@@ -4,7 +4,8 @@
 
 # Visual Studio
 .vs/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 *.user
 *.userosscache
 *.sln.docstates

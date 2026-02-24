@@ -1,0 +1,47 @@
+name: Publish NuGet
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore CodeWorks.SimpleSql.sln
+
+      - name: Test
+        run: dotnet test CodeWorks.SimpleSql.sln --configuration Release --no-restore
+
+      - name: Pack
+        run: dotnet pack CodeWorks.SimpleSql.csproj --configuration Release --no-restore --output ./artifacts
+
+      - name: Validate tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PROJECT_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' CodeWorks.SimpleSql.csproj)
+
+          if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match project version ($PROJECT_VERSION)."
+            exit 1
+          fi
+
+      - name: Push package to NuGet
+        run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Push symbols to NuGet
+        run: dotnet nuget push "./artifacts/*.snupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

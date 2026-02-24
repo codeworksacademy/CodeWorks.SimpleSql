@@ -40,3 +40,20 @@ dotnet test
 
 dotnet pack -c Release
 ```
+
+## Release automation (GitHub Actions)
+
+NuGet publish is automated via [.github/workflows/publish-nuget.yml](.github/workflows/publish-nuget.yml).
+
+- Trigger: push a git tag matching `v*` (example: `v0.1.1`)
+- Required repository secret: `NUGET_API_KEY`
+- Workflow actions: restore, test, pack, push `.nupkg`, push `.snupkg`
+
+### VS Code release task
+
+Run task: `release: bump and publish next`
+
+- Bumps patch version in `CodeWorks.SimpleSql.csproj` (for example `0.1.0` → `0.1.1`)
+- Runs test suite
+- Commits the version bump and creates git tag `vX.Y.Z`
+- Pushes commit + tag to `origin` (which triggers NuGet publish workflow)
