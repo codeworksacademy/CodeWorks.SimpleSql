@@ -13,15 +13,77 @@
 dotnet add package CodeWorks.SimpleSql
 ```
 
-## Quick start
+  new[] { typeof(MyEntity), typeof(AnotherEntity) },
+  options: new SchemaSyncOptions
+  {
+    LogPath = "/absolute/path/to/db-sync.log",
+    EnableConsoleLogging = true
+  }
 
 ```csharp
+`LogPath` is optional; when omitted, no log file is written.
 SqlHelper.UseDialect(SqlDialects.Postgres);
 
 var sql = SqlHelper.For<MyEntity>();
-var insertColumns = sql.InsertColumns;
-var insertValues = sql.InsertValues;
 ```
+
+## Query + repository-style usage
+
+```csharp
+var orders = await session
+  .Set<Order>()
+  .Where(x => x.Status == "active")
+  .OrderBy(x => x.CreatedAt, desc: true)
+  .Page(1, 50)
+  .ToListAsync();
+
+var first = await session
+  .Set<Order>()
+  .Where(x => x.Status == "active")
+  .FirstOrDefaultAsync();
+
+var count = await session
+  .Set<Order>()
+  .Where(x => x.Status == "active")
+  .CountAsync();
+
+var any = await session
+  .Set<Order>()
+  .Where(x => x.Status == "active")
+  .AnyAsync();
+```
+
+### Relationship include
+
+```csharp
+var withCustomer = await session
+  .Set<Order>()
+  .Include<Customer>(x => x.Customer)
+  .Where(x => x.Status == "active")
+  .ToListAsync();
+```
+
+### Upsert / UpsertMany
+
+```csharp
+await session
+  .Set<MonthlyRevenue>()
+  .UpsertAsync(
+    row,
+    x => new { x.BusinessId, x.Year, x.Month });
+
+await session
+  .Set<MonthlyRevenue>()
+  .UpsertManyAsync(
+    rows,
+    x => new { x.BusinessId, x.Year, x.Month },
+    batchSize: 500);
+```
+
+`UpsertAsync` and `UpsertManyAsync` are dialect-aware:
+
+- PostgreSQL: `INSERT ... ON CONFLICT ...`
+- SQL Server: `MERGE ...`
 
 ## Schema sync
 

@@ -23,8 +23,11 @@ public static class SchemaSync
     IDbTransaction tx,
     IEnumerable<Type> models,
     string? schema = null,
-    ISqlDialect? dialect = null)
+    ISqlDialect? dialect = null,
+    SchemaSyncOptions? options = null)
   {
+    SchemaSyncLogger.Configure(options);
+
     var activeDialect = dialect ?? SqlDialects.Detect(db);
     _schema ??= schema ?? await DetectSchemaAsync(db, tx, activeDialect);
 
@@ -76,6 +79,12 @@ public static class SchemaSync
 
     return schema;
   }
+}
+
+public sealed class SchemaSyncOptions
+{
+  public string? LogPath { get; init; }
+  public bool EnableConsoleLogging { get; init; } = true;
 }
 
 internal sealed class TableSyncStep : ISchemaSyncStep
@@ -237,33 +246,75 @@ internal sealed class ConstraintSyncStep : ISchemaSyncStep
 
 internal static class SchemaSyncLogger
 {
-  private static readonly string LogPath =
-    Path.Combine(AppContext.BaseDirectory, "../../../logs", "db-sync.log");
+  private static readonly object Gate = new();
+  private static string? _logPath;
+  private static bool _enableConsoleLogging = true;
 
   private static readonly List<string> PendingLogs = [];
+
+  public static void Configure(SchemaSyncOptions? options)
+  {
+    if (options == null)
+      return;
+
+    lock (Gate)
+    {
+      _logPath = string.IsNullOrWhiteSpace(options.LogPath) ? null : options.LogPath;
+      _enableConsoleLogging = options.EnableConsoleLogging;
+    }
+  }
 
   public static void Log(string message)
   {
     var line = $"[SchemaSync] [{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] {message}";
-    PendingLogs.Add(line);
-    Console.WriteLine(line);
+    lock (Gate)
+    {
+      PendingLogs.Add(line);
+
+      if (_enableConsoleLogging)
+        Console.WriteLine(line);
+    }
   }
 
   public static void Write()
   {
-    if (PendingLogs.Count == 0)
+    List<string> snapshot;
+    string? logPath;
+    bool writeToConsole;
+
+    lock (Gate)
     {
-      Console.WriteLine("[SchemaSync] No logs to write.");
-      return;
+      writeToConsole = _enableConsoleLogging;
+
+      if (PendingLogs.Count == 0)
+      {
+        if (writeToConsole)
+          Console.WriteLine("[SchemaSync] No logs to write.");
+
+        return;
+      }
+
+      snapshot = PendingLogs.ToList();
+      PendingLogs.Clear();
+      logPath = _logPath;
     }
 
-    var logDir = Path.GetDirectoryName(LogPath);
-    if (!Directory.Exists(logDir))
-      Directory.CreateDirectory(logDir!);
+    if (!string.IsNullOrWhiteSpace(logPath))
+    {
+      var logDir = Path.GetDirectoryName(logPath);
+      if (!string.IsNullOrWhiteSpace(logDir) && !Directory.Exists(logDir))
+        Directory.CreateDirectory(logDir);
 
-    File.AppendAllLines(LogPath, PendingLogs);
-    Console.WriteLine($"[SchemaSync] Wrote {PendingLogs.Count} log entries to {LogPath}");
-    PendingLogs.Clear();
+      File.AppendAllLines(logPath, snapshot);
+    }
+
+    if (writeToConsole)
+    {
+      if (!string.IsNullOrWhiteSpace(logPath))
+        Console.WriteLine($"[SchemaSync] Wrote {snapshot.Count} log entries to {logPath}");
+      else
+        Console.WriteLine($"[SchemaSync] Processed {snapshot.Count} log entries.");
+    }
   }
 }
 

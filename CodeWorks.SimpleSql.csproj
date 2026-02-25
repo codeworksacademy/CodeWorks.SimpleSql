@@ -28,6 +28,8 @@
 
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="examples/**/*.cs" />
     <None Include="tests/**" Exclude="tests/**/*.csproj" Visible="false" />
+    <None Include="examples/**" Exclude="examples/**/*.csproj" Visible="false" />
   </ItemGroup>
 </Project>

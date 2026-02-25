@@ -1,6 +1,7 @@
 using System.Data;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.Json;
 using Dapper;
 
 namespace CodeWorks.SimpleSql;
@@ -17,7 +18,14 @@ public interface IDbSet<T>
   IDbSet<T> OrderBy(Expression<Func<T, object>> expression, bool desc = false);
   IDbSet<T> Page(int page, int size);
   Task<List<T>> ToListAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<T?> FirstOrDefaultAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<int> CountAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<bool> AnyAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<int> UpsertAsync(T entity, Expression<Func<T, object>> keySelector, IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<int> UpsertManyAsync(IEnumerable<T> entities, Expression<Func<T, object>> keySelector, int batchSize = 200, IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  CompiledQuery ToUpsertCompiledQuery(T entity, Expression<Func<T, object>> keySelector);
   CompiledQuery ToCompiledQuery();
+  CompiledQuery ToCompiledQuery(SqlQueryResultMode mode);
 }
 
 public sealed class SqlSession : ISqlSession
@@ -74,7 +82,9 @@ public sealed class DbSet<T> : IDbSet<T>
     return new DbSet<T>(_db, _dialect, _model.SetPaging(page, size));
   }
 
-  public CompiledQuery ToCompiledQuery() => SqlQueryCompiler.Compile(_model, _dialect);
+  public CompiledQuery ToCompiledQuery() => ToCompiledQuery(SqlQueryResultMode.List);
+
+  public CompiledQuery ToCompiledQuery(SqlQueryResultMode mode) => SqlQueryCompiler.Compile(_model, _dialect, mode);
 
   public async Task<List<T>> ToListAsync(
     IDbTransaction? transaction = null,
@@ -90,9 +100,114 @@ public sealed class DbSet<T> : IDbSet<T>
     var rows = await _db.QueryAsync<T>(command);
     return rows.ToList();
   }
+
+  public async Task<T?> FirstOrDefaultAsync(
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    var compiled = ToCompiledQuery(SqlQueryResultMode.First);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    return await _db.QueryFirstOrDefaultAsync<T>(command);
+  }
+
+  public async Task<int> CountAsync(
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    var compiled = ToCompiledQuery(SqlQueryResultMode.Count);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    return await _db.ExecuteScalarAsync<int>(command);
+  }
+
+  public async Task<bool> AnyAsync(
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    var compiled = ToCompiledQuery(SqlQueryResultMode.Exists);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    return await _db.ExecuteScalarAsync<bool>(command);
+  }
+
+  public CompiledQuery ToUpsertCompiledQuery(T entity, Expression<Func<T, object>> keySelector)
+    => SqlWriteCompiler.BuildUpsert(entity, keySelector, _dialect);
+
+  public async Task<int> UpsertAsync(
+    T entity,
+    Expression<Func<T, object>> keySelector,
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    var compiled = ToUpsertCompiledQuery(entity, keySelector);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    return await _db.ExecuteAsync(command);
+  }
+
+  public async Task<int> UpsertManyAsync(
+    IEnumerable<T> entities,
+    Expression<Func<T, object>> keySelector,
+    int batchSize = 200,
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    ArgumentNullException.ThrowIfNull(entities);
+    if (batchSize < 1)
+      throw new ArgumentOutOfRangeException(nameof(batchSize));
+
+    var rows = entities as IList<T> ?? entities.ToList();
+    if (rows.Count == 0)
+      return 0;
+
+    var plan = SqlWriteCompiler.BuildUpsertPlan(keySelector, _dialect);
+    var total = 0;
+
+    foreach (var batch in rows.Chunk(batchSize))
+    {
+      var parameterBatch = batch
+        .Select(row => (object)SqlWriteCompiler.BuildUpsertParameters(row, plan.InsertProps))
+        .ToList();
+
+      var command = new CommandDefinition(
+        plan.Sql,
+        parameterBatch,
+        transaction: transaction,
+        cancellationToken: cancellationToken);
+
+      total += await _db.ExecuteAsync(command);
+    }
+
+    return total;
+  }
 }
 
 public readonly record struct CompiledQuery(string Sql, DynamicParameters Parameters);
+
+public enum SqlQueryResultMode
+{
+  List,
+  First,
+  Count,
+  Exists
+}
 
 internal readonly record struct IncludeSpec(
   Type JoinType,
@@ -159,7 +274,10 @@ internal sealed class SqlQueryModel
 
 internal static class SqlQueryCompiler
 {
-  public static CompiledQuery Compile(SqlQueryModel model, ISqlDialect dialect)
+  public static CompiledQuery Compile(
+    SqlQueryModel model,
+    ISqlDialect dialect,
+    SqlQueryResultMode mode = SqlQueryResultMode.List)
   {
     var parameters = new DynamicParameters();
     var query = CreateTypedQuery(model.RootType, dialect);
@@ -167,10 +285,15 @@ internal static class SqlQueryCompiler
     foreach (var include in model.Includes)
       query = ApplyInclude(query, include);
 
-    var selectFrom = (string)(query.GetType()
-      .GetMethod(nameof(SqlQuery<object>.BuildSelectFrom))
+    var fromSql = (string)(query.GetType()
+      .GetMethod(nameof(SqlQuery<object>.BuildFrom))
       ?.Invoke(query, null)
-      ?? throw new InvalidOperationException("Failed to build SELECT/FROM SQL."));
+      ?? throw new InvalidOperationException("Failed to build FROM SQL."));
+
+    var selectSql = (string)(query.GetType()
+      .GetMethod(nameof(SqlQuery<object>.BuildSelect))
+      ?.Invoke(query, null)
+      ?? throw new InvalidOperationException("Failed to build SELECT SQL."));
 
     var whereParts = model.Wheres
       .Select(w => SqlExpressionBuilder.Build(w, SQLMapper.Get(model.RootType), parameters, "t0", dialect).Replace("WHERE ", string.Empty))
@@ -192,8 +315,38 @@ internal static class SqlQueryCompiler
     var pagingSql = SqlHelper.BuildPaging(model.Limit, model.Offset);
     var paging = string.IsNullOrWhiteSpace(pagingSql) ? string.Empty : " " + pagingSql;
 
-    var sql = $"{selectFrom}{whereSql}{orderSql}{paging}";
+    var baseQuerySql = $"{selectSql} {fromSql}{whereSql}";
+    var sql = mode switch
+    {
+      SqlQueryResultMode.List => $"{baseQuerySql}{orderSql}{paging}",
+      SqlQueryResultMode.First => BuildFirstSql(baseQuerySql, orderSql, dialect),
+      SqlQueryResultMode.Count => $"SELECT COUNT(1) {fromSql}{whereSql}",
+      SqlQueryResultMode.Exists => BuildExistsSql(fromSql, whereSql, dialect),
+      _ => throw new NotSupportedException($"Unsupported query mode: {mode}")
+    };
+
     return new CompiledQuery(sql, parameters);
+  }
+
+  private static string BuildFirstSql(string baseQuerySql, string orderSql, ISqlDialect dialect)
+  {
+    if (string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase))
+    {
+      const string token = "SELECT ";
+      return baseQuerySql.StartsWith(token, StringComparison.Ordinal)
+        ? $"SELECT TOP 1 {baseQuerySql[token.Length..]}{orderSql}"
+        : $"SELECT TOP 1 * FROM ({baseQuerySql}) t{orderSql}";
+    }
+
+    return $"{baseQuerySql}{orderSql} LIMIT 1";
+  }
+
+  private static string BuildExistsSql(string fromSql, string whereSql, ISqlDialect dialect)
+  {
+    if (string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase))
+      return $"SELECT CASE WHEN EXISTS (SELECT 1 {fromSql}{whereSql}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
+
+    return $"SELECT EXISTS (SELECT 1 {fromSql}{whereSql})";
   }
 
   private static object CreateTypedQuery(Type rootType, ISqlDialect dialect)
@@ -218,5 +371,133 @@ internal static class SqlQueryCompiler
 
     return genericInclude.Invoke(query, [include.Navigation, include.JoinKind, include.Alias])
       ?? throw new InvalidOperationException("Failed to apply include.");
+  }
+}
+
+internal static class SqlWriteCompiler
+{
+  internal readonly record struct UpsertPlan(string Sql, IReadOnlyList<SqlPropertyMap> InsertProps);
+
+  public static UpsertPlan BuildUpsertPlan<T>(Expression<Func<T, object>> keySelector, ISqlDialect dialect)
+  {
+    var map = SQLMapper.Get<T>();
+    var keys = ResolveKeyProperties(keySelector, map);
+    if (keys.Count == 0)
+      throw new InvalidOperationException("Upsert requires at least one key column.");
+
+    var writable = map.Writable.ToList();
+    var keyNames = keys.Select(k => k.Property.Name).ToHashSet(StringComparer.Ordinal);
+
+    var insertProps = keys
+      .Concat(writable.Where(w => !keyNames.Contains(w.Property.Name)))
+      .ToList();
+
+    var updateProps = writable
+      .Where(w => !keyNames.Contains(w.Property.Name))
+      .ToList();
+
+    var tableName = SqlHelper.ResolveTableName(typeof(T));
+    var sql = string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase)
+      ? BuildSqlServerUpsertSql(tableName, insertProps, keys, updateProps, dialect)
+      : BuildPostgresUpsertSql(tableName, insertProps, keys, updateProps, dialect);
+
+    return new UpsertPlan(sql, insertProps);
+  }
+
+  public static DynamicParameters BuildUpsertParameters<T>(T entity, IReadOnlyList<SqlPropertyMap> insertProps)
+  {
+    var parameters = new DynamicParameters();
+
+    foreach (var prop in insertProps)
+    {
+      var value = prop.Property.GetValue(entity);
+      if (prop.IsJson)
+        parameters.Add(prop.Property.Name, JsonSerializer.Serialize(value));
+      else
+        parameters.Add(prop.Property.Name, value);
+    }
+
+    return parameters;
+  }
+
+  public static CompiledQuery BuildUpsert<T>(T entity, Expression<Func<T, object>> keySelector, ISqlDialect dialect)
+  {
+    var plan = BuildUpsertPlan(keySelector, dialect);
+    var parameters = BuildUpsertParameters(entity, plan.InsertProps);
+    return new CompiledQuery(plan.Sql, parameters);
+  }
+
+  private static string BuildPostgresUpsertSql(
+    string tableName,
+    IReadOnlyList<SqlPropertyMap> insertProps,
+    IReadOnlyList<SqlPropertyMap> keys,
+    IReadOnlyList<SqlPropertyMap> updateProps,
+    ISqlDialect dialect)
+  {
+    var table = dialect.Quote(tableName);
+    var columns = string.Join(", ", insertProps.Select(p => dialect.Quote(p.Column)));
+    var values = string.Join(", ", insertProps.Select(p =>
+      p.IsJson ? dialect.ParameterJsonCast($"@{p.Property.Name}") : $"@{p.Property.Name}"));
+
+    var conflictCols = string.Join(", ", keys.Select(k => dialect.Quote(k.Column)));
+
+    if (updateProps.Count == 0)
+      return $"INSERT INTO {table} ({columns}) VALUES ({values}) ON CONFLICT ({conflictCols}) DO NOTHING;";
+
+    var updates = string.Join(", ", updateProps.Select(p =>
+      $"{dialect.Quote(p.Column)} = EXCLUDED.{dialect.Quote(p.Column)}"));
+
+    return $"INSERT INTO {table} ({columns}) VALUES ({values}) ON CONFLICT ({conflictCols}) DO UPDATE SET {updates};";
+  }
+
+  private static string BuildSqlServerUpsertSql(
+    string tableName,
+    IReadOnlyList<SqlPropertyMap> insertProps,
+    IReadOnlyList<SqlPropertyMap> keys,
+    IReadOnlyList<SqlPropertyMap> updateProps,
+    ISqlDialect dialect)
+  {
+    var table = dialect.Quote(tableName);
+    var sourceProjection = string.Join(", ", insertProps.Select(p => $"@{p.Property.Name} AS {dialect.Quote(p.Column)}"));
+    var sourceColumns = string.Join(", ", insertProps.Select(p => dialect.Quote(p.Column)));
+
+    var onClause = string.Join(" AND ", keys.Select(k =>
+      $"target.{dialect.Quote(k.Column)} = source.{dialect.Quote(k.Column)}"));
+
+    var updateClause = updateProps.Count == 0
+      ? string.Empty
+      : " WHEN MATCHED THEN UPDATE SET " + string.Join(", ", updateProps.Select(p =>
+        $"target.{dialect.Quote(p.Column)} = source.{dialect.Quote(p.Column)}"));
+
+    var insertColumns = string.Join(", ", insertProps.Select(p => dialect.Quote(p.Column)));
+    var insertValues = string.Join(", ", insertProps.Select(p => $"source.{dialect.Quote(p.Column)}"));
+
+    return $"MERGE {table} AS target USING (SELECT {sourceProjection}) AS source ({sourceColumns}) ON {onClause}{updateClause} WHEN NOT MATCHED THEN INSERT ({insertColumns}) VALUES ({insertValues});";
+  }
+
+  private static IReadOnlyList<SqlPropertyMap> ResolveKeyProperties<T>(Expression<Func<T, object>> selector, SqlEntityMap map)
+  {
+    IEnumerable<string> names = selector.Body switch
+    {
+      MemberExpression m => [m.Member.Name],
+      UnaryExpression { Operand: MemberExpression m } => [m.Member.Name],
+      NewExpression n => n.Arguments
+        .Select(a => a as MemberExpression ?? (a as UnaryExpression)?.Operand as MemberExpression)
+        .Where(m => m != null)
+        .Select(m => m!.Member.Name),
+      _ => throw new NotSupportedException("Key selector must be a member access or anonymous object expression.")
+    };
+
+    var result = new List<SqlPropertyMap>();
+    foreach (var name in names)
+    {
+      var match = map.Properties.FirstOrDefault(p => p.Property.Name == name);
+      if (match == null)
+        throw new InvalidOperationException($"Could not resolve key property '{name}' on {typeof(T).Name}.");
+
+      result.Add(match);
+    }
+
+    return result;
   }
 }
