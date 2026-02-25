@@ -335,6 +335,26 @@ public static class SqlFilterBuilder
 
 public static class SqlExpressionBuilder
 {
+  public static string Build(
+    LambdaExpression predicate,
+    SqlEntityMap map,
+    DynamicParameters parameters,
+    string? alias = null,
+    ISqlDialect? dialect = null
+  )
+  {
+    if (predicate.Parameters.Count != 1 || predicate.Parameters[0].Type != map.EntityType)
+      throw new InvalidOperationException($"Predicate parameter type must match {map.EntityType.Name}.");
+
+    var activeDialect = dialect ?? SqlHelper.Dialect;
+    var ctx = new SqlPredicateContext(map, parameters, alias, activeDialect);
+    var visitor = new SqlExpressionVisitor(ctx);
+
+    visitor.Visit(predicate.Body);
+
+    return $"WHERE {visitor.Sql}";
+  }
+
   public static string Build<T>(
     Expression<Func<T, bool>> predicate,
     SqlEntityMap map,
@@ -643,6 +663,31 @@ public static class SqlHelper
   {
     var activeDialect = dialect ?? Dialect;
     var map = SQLMapper.Get<T>();
+    MemberExpression member = expr.Body switch
+    {
+      MemberExpression m => m,
+      UnaryExpression u when u.Operand is MemberExpression m => m,
+      _ => throw new NotSupportedException("Invalid order expression")
+    };
+
+    var prop = map.Properties.First(p => p.Property.Name == member.Member.Name).Property;
+    var column = activeDialect.Quote(prop.GetCustomAttribute<DbColumnAttribute>()?.ColumnName ?? SqlFilterBuilder.ToSnakeCase(prop.Name));
+    return $"{alias}.{column} {(desc ? "DESC" : "ASC")}";
+  }
+
+  public static string BuildOrderBy(
+      LambdaExpression expr,
+      Type entityType,
+      string alias,
+      bool desc = false,
+      ISqlDialect? dialect = null)
+  {
+    if (expr.Parameters.Count != 1 || expr.Parameters[0].Type != entityType)
+      throw new InvalidOperationException($"Order expression parameter type must match {entityType.Name}.");
+
+    var activeDialect = dialect ?? Dialect;
+    var map = SQLMapper.Get(entityType);
+
     MemberExpression member = expr.Body switch
     {
       MemberExpression m => m,
