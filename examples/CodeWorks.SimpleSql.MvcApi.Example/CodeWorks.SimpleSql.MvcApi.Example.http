@@ -13,6 +13,10 @@ Accept: {{contentType}}
 GET {{host}}/api/accounts/summaries
 Accept: {{contentType}}
 
+### List rich accounts (include owner + manager object graph)
+GET {{host}}/api/accounts/rich
+Accept: {{contentType}}
+
 ### Upsert an account (create/update)
 POST {{host}}/api/accounts/upsert
 Content-Type: {{contentType}}
@@ -33,4 +37,8 @@ Accept: {{contentType}}
 
 ### Re-check summaries after upsert
 GET {{host}}/api/accounts/summaries
+Accept: {{contentType}}
+
+### Re-check rich accounts after upsert
+GET {{host}}/api/accounts/rich
 Accept: {{contentType}}

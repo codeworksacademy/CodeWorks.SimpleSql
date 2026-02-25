@@ -1,5 +1,6 @@
 using System.Data;
 using System.Collections.Concurrent;
+using System.Collections;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
@@ -105,6 +106,9 @@ public sealed class DbSet<T> : IDbSet<T>
   {
     EnsureTransactionConnectionMatches(transaction);
 
+    if (_model.Includes.Count > 0)
+      return await ToListWithIncludesAsync(transaction, cancellationToken);
+
     var compiled = ToCompiledQuery();
     var command = new CommandDefinition(
       compiled.Sql,
@@ -121,6 +125,9 @@ public sealed class DbSet<T> : IDbSet<T>
     CancellationToken cancellationToken = default)
   {
     EnsureTransactionConnectionMatches(transaction);
+
+    if (_model.Includes.Count > 0)
+      return await FirstOrDefaultWithIncludesAsync(transaction, cancellationToken);
 
     var compiled = ToCompiledQuery(SqlQueryResultMode.First);
     var command = new CommandDefinition(
@@ -228,6 +235,39 @@ public sealed class DbSet<T> : IDbSet<T>
     if (transaction?.Connection != null && !ReferenceEquals(transaction.Connection, _db))
       throw new InvalidOperationException("The provided transaction does not belong to the DbSet connection.");
   }
+
+  private async Task<List<T>> ToListWithIncludesAsync(
+    IDbTransaction? transaction,
+    CancellationToken cancellationToken)
+  {
+    var compiled = SqlQueryCompiler.CompileNested(_model, _dialect, SqlQueryResultMode.List);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    var rows = await _db.QueryAsync(command);
+    return rows
+      .Cast<object>()
+      .Select(row => SqlQueryCompiler.MapNestedRow<T>(row, compiled))
+      .ToList();
+  }
+
+  private async Task<T?> FirstOrDefaultWithIncludesAsync(
+    IDbTransaction? transaction,
+    CancellationToken cancellationToken)
+  {
+    var compiled = SqlQueryCompiler.CompileNested(_model, _dialect, SqlQueryResultMode.First);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    var row = await _db.QueryFirstOrDefaultAsync(command);
+    return row == null ? default : SqlQueryCompiler.MapNestedRow<T>(row, compiled);
+  }
 }
 
 public sealed class ProjectedDbSet<TRoot, TProjection> : IProjectedDbSet<TProjection>
@@ -289,6 +329,14 @@ public sealed class ProjectedDbSet<TRoot, TProjection> : IProjectedDbSet<TProjec
 }
 
 public readonly record struct CompiledQuery(string Sql, DynamicParameters Parameters);
+
+internal readonly record struct NestedIncludePlan(string Alias, PropertyInfo NavigationProperty, SqlEntityMap Map);
+
+internal readonly record struct NestedCompiledQuery(
+  string Sql,
+  DynamicParameters Parameters,
+  SqlEntityMap RootMap,
+  IReadOnlyList<NestedIncludePlan> Includes);
 
 public enum SqlQueryResultMode
 {
@@ -495,6 +543,115 @@ internal static class SqlQueryCompiler
     return new CompiledQuery(sql, parameters);
   }
 
+  public static NestedCompiledQuery CompileNested(
+    SqlQueryModel model,
+    ISqlDialect dialect,
+    SqlQueryResultMode mode)
+  {
+    if (mode is not (SqlQueryResultMode.List or SqlQueryResultMode.First))
+      throw new NotSupportedException("Nested query compilation supports List and First modes only.");
+
+    var parameters = new DynamicParameters();
+    var query = CreateTypedQuery(model.RootType, dialect);
+    foreach (var include in model.Includes)
+      query = ApplyInclude(query, include);
+
+    var fromSql = (string)(query.GetType()
+      .GetMethod(nameof(SqlQuery<object>.BuildFrom))
+      ?.Invoke(query, null)
+      ?? throw new InvalidOperationException("Failed to build nested FROM SQL."));
+
+    var whereParts = model.Wheres
+      .Select(w => SqlExpressionBuilder.Build(w, SQLMapper.Get(model.RootType), parameters, "t0", dialect).Replace("WHERE ", string.Empty))
+      .Where(w => !string.IsNullOrWhiteSpace(w))
+      .ToList();
+
+    var whereSql = whereParts.Count == 0
+      ? string.Empty
+      : " WHERE " + string.Join(" AND ", whereParts);
+
+    var orderParts = model.Orders
+      .Select(o => SqlHelper.BuildOrderBy(o.Expression, model.RootType, "t0", o.Desc, dialect))
+      .ToList();
+
+    var orderSql = orderParts.Count == 0
+      ? string.Empty
+      : " ORDER BY " + string.Join(", ", orderParts);
+
+    var hasPaging = model.Limit.HasValue || model.Offset.HasValue;
+    var sqlServerPagingNeedsOrderFallback =
+      hasPaging
+      && orderParts.Count == 0
+      && string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase);
+
+    var pagingSql = SqlHelper.BuildPaging(
+      model.Limit,
+      model.Offset,
+      dialect,
+      forceOrderByForSqlServer: sqlServerPagingNeedsOrderFallback);
+
+    var paging = string.IsNullOrWhiteSpace(pagingSql) ? string.Empty : " " + pagingSql;
+
+    var rootMap = SQLMapper.Get(model.RootType);
+    var includePlans = BuildNestedIncludePlans(model.RootType, model.Includes);
+    var selectSql = BuildNestedSelectSql(rootMap, includePlans, dialect);
+
+    var baseSql = $"{selectSql} {fromSql}{whereSql}";
+    var sql = mode switch
+    {
+      SqlQueryResultMode.List => $"{baseSql}{orderSql}{paging}",
+      SqlQueryResultMode.First => BuildFirstSql(baseSql, orderSql, dialect),
+      _ => throw new NotSupportedException($"Unsupported nested mode: {mode}")
+    };
+
+    return new NestedCompiledQuery(sql, parameters, rootMap, includePlans);
+  }
+
+  public static T MapNestedRow<T>(object row, NestedCompiledQuery compiled)
+  {
+    var values = row switch
+    {
+      IDictionary<string, object> typed => typed.ToDictionary(k => k.Key, v => (object?)v.Value, StringComparer.OrdinalIgnoreCase),
+      IDictionary nonGeneric => nonGeneric.Keys.Cast<object>()
+        .ToDictionary(k => k.ToString() ?? string.Empty, k => nonGeneric[k], StringComparer.OrdinalIgnoreCase),
+      _ => throw new InvalidOperationException("Nested mapping expects dictionary-backed Dapper rows.")
+    };
+    var root = Activator.CreateInstance<T>()
+      ?? throw new InvalidOperationException($"Could not create instance of {typeof(T).Name}.");
+
+    foreach (var prop in compiled.RootMap.Selectable)
+    {
+      var key = $"root__{prop.Property.Name}";
+      if (values.TryGetValue(key, out var value))
+        AssignPropertyValue(root, prop.Property, value);
+    }
+
+    foreach (var include in compiled.Includes)
+    {
+      var includeInstance = Activator.CreateInstance(include.Map.EntityType);
+      if (includeInstance == null)
+        continue;
+
+      var hasAnyValue = false;
+      foreach (var includeProp in include.Map.Selectable)
+      {
+        var key = $"inc__{include.Alias}__{includeProp.Property.Name}";
+        if (!values.TryGetValue(key, out var value))
+          continue;
+
+        if (value is not null and not DBNull)
+          hasAnyValue = true;
+
+        AssignPropertyValue(includeInstance, includeProp.Property, value);
+      }
+
+      if (hasAnyValue)
+        include.NavigationProperty.SetValue(root, includeInstance);
+    }
+
+    return root;
+  }
+
   private static string BuildProjectionSelectSql(
     Type rootType,
     IReadOnlyList<IncludeSpec> includes,
@@ -583,6 +740,69 @@ internal static class SqlQueryCompiler
       UnaryExpression { Operand: MemberExpression m } when m.Member is PropertyInfo p => p,
       _ => throw new InvalidOperationException("Navigation expression must target a property.")
     };
+  }
+
+  private static IReadOnlyList<NestedIncludePlan> BuildNestedIncludePlans(
+    Type rootType,
+    IReadOnlyList<IncludeSpec> includes)
+  {
+    var plans = new List<NestedIncludePlan>();
+
+    for (var includeIndex = 0; includeIndex < includes.Count; includeIndex++)
+    {
+      var include = includes[includeIndex];
+      var navProp = ExtractPropertyInfo(include.Navigation);
+      var relation = navProp.GetCustomAttribute<DbRelationAttribute>()
+        ?? throw new InvalidOperationException($"Property {navProp.Name} is missing [DbRelation].");
+
+      if (relation.RelatedType != include.JoinType)
+        throw new InvalidOperationException($"[DbRelation] type mismatch on {navProp.Name}. Expected {include.JoinType.Name}.");
+
+      var resolvedAlias = include.Alias ?? relation.Alias ?? $"t{includeIndex + 1}";
+      if (plans.Any(p => string.Equals(p.Alias, resolvedAlias, StringComparison.OrdinalIgnoreCase)))
+        throw new InvalidOperationException($"Duplicate include alias '{resolvedAlias}' detected.");
+
+      plans.Add(new NestedIncludePlan(
+        resolvedAlias,
+        navProp,
+        SQLMapper.Get(include.JoinType)));
+    }
+
+    return plans;
+  }
+
+  private static string BuildNestedSelectSql(
+    SqlEntityMap rootMap,
+    IReadOnlyList<NestedIncludePlan> includes,
+    ISqlDialect dialect)
+  {
+    var cols = new List<string>();
+
+    foreach (var rootProp in rootMap.Selectable)
+      cols.Add($"t0.{dialect.Quote(rootProp.Column)} AS {dialect.Quote($"root__{rootProp.Property.Name}")}");
+
+    foreach (var include in includes)
+    {
+      foreach (var includeProp in include.Map.Selectable)
+        cols.Add($"{include.Alias}.{dialect.Quote(includeProp.Column)} AS {dialect.Quote($"inc__{include.Alias}__{includeProp.Property.Name}")}");
+    }
+
+    return "SELECT " + string.Join(", ", cols);
+  }
+
+  private static void AssignPropertyValue(object target, PropertyInfo property, object? rawValue)
+  {
+    if (rawValue is null or DBNull)
+      return;
+
+    var targetType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+    var sourceType = rawValue.GetType();
+
+    object converted = targetType.IsAssignableFrom(sourceType)
+      ? rawValue
+      : Convert.ChangeType(rawValue, targetType);
+
+    property.SetValue(target, converted);
   }
 
   private readonly record struct ProjectionSource(string Alias, Type ModelType, SqlEntityMap Map);

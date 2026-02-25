@@ -16,6 +16,13 @@ public sealed class AccountsController(IAccountsRepository repository) : Control
         return Ok(rows);
     }
 
+        [HttpGet("rich")]
+        public async Task<ActionResult<List<Account>>> GetRich()
+        {
+            List<Account> rows = await _repository.GetRichAccountsAsync();
+            return Ok(rows);
+        }
+
     [HttpGet("profiles")]
     public async Task<ActionResult<List<PublicProfile>>> GetProfiles()
     {

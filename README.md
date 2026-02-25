@@ -190,6 +190,7 @@ It demonstrates:
 - repository pattern + controller endpoints
 - projection models (`Select<TProjection>()`)
 - include disambiguation with `[ProjectionSource("alias")]`
+- nested include materialization for object graphs (`Include(...).ToListAsync()`)
 - upsert writes inside explicit transaction scope
 
 Run it:
@@ -203,6 +204,7 @@ Sample endpoints:
 
 - `GET /api/accounts/profiles`
 - `GET /api/accounts/summaries`
+- `GET /api/accounts/rich`
 - `POST /api/accounts/upsert`
 
 ## Build, test, pack
