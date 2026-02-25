@@ -3,12 +3,18 @@ using CodeWorks.SimpleSql.MvcApi.Example.Repositories;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5175";
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ListenAnyIP(int.Parse(port));
+});
+
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-// builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: true, reloadOnChange: true)
-//   .AddEnvironmentVariables();
+builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: true, reloadOnChange: true)
+  .AddEnvironmentVariables();
 
 var connectionString = builder.Configuration.GetConnectionString("Default")
   ?? Environment.GetEnvironmentVariable("SIMPLESQL_EXAMPLE_CONNECTION")

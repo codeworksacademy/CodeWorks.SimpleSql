@@ -1,4 +1,4 @@
-@host = http://localhost:5000
+@host = http://localhost:5175
 @contentType = application/json
 
 ### Health check (if app is running)

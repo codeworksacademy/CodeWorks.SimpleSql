@@ -8,6 +8,8 @@ public interface IAccountsRepository
     Task<List<PublicProfile>> GetPublicProfilesAsync();
     Task<List<AccountSummaryProjection>> GetAccountSummariesAsync();
     Task UpsertAccountAsync(Account account);
+    Task<List<Account>> GetAccountsAsync();
+    Task<List<Account>> GetRichAccountsAsync();
 }
 
 public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsRepository
@@ -20,6 +22,20 @@ public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsR
           .Set<Account>()
           .Where(x => x.Active)
           .Select<PublicProfile>()
+          .ToListAsync());
+
+    public Task<List<Account>> GetAccountsAsync() =>
+      WithSession(async session =>
+        await session
+          .Set<Account>()
+          .ToListAsync());
+
+    public Task<List<Account>> GetRichAccountsAsync() =>
+      WithSession(async session =>
+        await session
+          .Set<Account>()
+          .Include<User>(x => x.Owner, alias: "owner")
+          .Include<User>(x => x.Manager, alias: "manager")
           .ToListAsync());
 
     public Task<List<AccountSummaryProjection>> GetAccountSummariesAsync() =>
@@ -75,11 +91,11 @@ public sealed class Account
     [DbColumn("manager_id")]
     public Guid ManagerId { get; set; }
 
-    [IgnoreWrite]
+    [IgnoreWrite, IgnoreSelect]
     [DbRelation(typeof(User), nameof(OwnerId), nameof(User.Id), Alias = "owner")]
     public User? Owner { get; set; }
 
-    [IgnoreWrite]
+    [IgnoreWrite, IgnoreSelect]
     [DbRelation(typeof(User), nameof(ManagerId), nameof(User.Id), Alias = "manager")]
     public User? Manager { get; set; }
 }
@@ -93,12 +109,12 @@ public sealed class PublicProfile
     public string DisplayName { get; set; } = string.Empty;
 }
 
-[DbTable("users")]
+[DbTable("accounts")]
 public sealed class User
 {
     public Guid Id { get; set; }
 
-    [DbColumn("name")]
+    [DbColumn("display_name")]
     public string Name { get; set; } = string.Empty;
 }
 
@@ -107,11 +123,11 @@ public sealed class AccountSummaryProjection
     [DbColumn("display_name")]
     public string AccountName { get; set; } = string.Empty;
 
-    [DbColumn("name")]
+    [DbColumn("display_name")]
     [ProjectionSource("owner")]
     public string OwnerName { get; set; } = string.Empty;
 
-    [DbColumn("name")]
+    [DbColumn("display_name")]
     [ProjectionSource("manager")]
     public string ManagerName { get; set; } = string.Empty;
 }
