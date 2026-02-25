@@ -15,6 +15,7 @@ public interface ISqlDialect
   string BuildTableName(string schema, string tableName);
   string BuildIndexName(string tableName, IEnumerable<string> columns);
   string BuildCreateTableSql(string schema, string tableName);
+  string BuildTableExistsSql();
   string BuildAddColumnSql(string schema, string tableName, string columnName, string sqlType);
   string BuildCreateIndexSql(string schema, string tableName, string indexName, IEnumerable<string> columns, bool unique);
   string BuildConstraintExistsSql();
@@ -71,6 +72,13 @@ internal sealed class PostgresDialect : ISqlDialect
         {Quote("updated_at")} TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );";
   }
+
+  public string BuildTableExistsSql() => @"
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = @schema
+      AND table_name = @table
+    );";
 
   public string BuildAddColumnSql(string schema, string tableName, string columnName, string sqlType)
   {
@@ -170,6 +178,13 @@ internal sealed class SqlServerDialect : ISqlDialect
         {Quote("updated_at")} DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
       );";
   }
+
+  public string BuildTableExistsSql() => @"
+    SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = @schema
+      AND TABLE_NAME = @table
+    ) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END;";
 
   public string BuildAddColumnSql(string schema, string tableName, string columnName, string sqlType)
   {

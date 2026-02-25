@@ -7,8 +7,9 @@ namespace CodeWorks.SimpleSql;
 
 public static class SchemaSync
 {
-  private static int _synced = 0;
-  private static string? _schema;
+  private static readonly SemaphoreSlim SyncGate = new(1, 1);
+  private static readonly object SyncedKeysGate = new();
+  private static readonly HashSet<string> SyncedKeys = [];
 
   private static readonly ISchemaSyncStep[] Steps =
   [
@@ -28,43 +29,80 @@ public static class SchemaSync
   {
     SchemaSyncLogger.Configure(options);
 
+    EnsureTransactionConnectionMatches(db, tx);
+
     var activeDialect = dialect ?? SqlDialects.Detect(db);
-    _schema ??= schema ?? await DetectSchemaAsync(db, tx, activeDialect);
+    var activeSchema = schema ?? await DetectSchemaAsync(db, tx, activeDialect);
+    var syncKey = BuildSyncKey(db, activeDialect, activeSchema);
 
-    if (Interlocked.Exchange(ref _synced, 1) == 1)
+    await SyncGate.WaitAsync();
+    try
     {
-      Console.WriteLine("[SchemaSync] Already synced.");
-      return;
-    }
-
-    foreach (var model in models)
-    {
-      var tableAttr = model.GetCustomAttribute<DbTableAttribute>();
-      if (tableAttr == null)
-        continue;
-
-      var tableName = tableAttr.TableName;
-
-      foreach (var step in Steps)
+      if (IsSynced(syncKey))
       {
-        await step.ExecuteAsync(
-          db,
-          tx,
-          _schema,
-          model,
-          tableName,
-          activeDialect
-        );
+        Console.WriteLine("[SchemaSync] Already synced.");
+        return;
       }
+
+      foreach (var model in models)
+      {
+        var tableAttr = model.GetCustomAttribute<DbTableAttribute>();
+        if (tableAttr == null)
+          continue;
+
+        var tableName = tableAttr.TableName;
+
+        foreach (var step in Steps)
+        {
+          await step.ExecuteAsync(
+            db,
+            tx,
+            activeSchema,
+            model,
+            tableName,
+            activeDialect
+          );
+        }
+      }
+
+      SchemaSyncLogger.Write();
+
+      var setSchemaSql = activeDialect.SetSchemaSql(activeSchema);
+      if (!string.IsNullOrWhiteSpace(setSchemaSql))
+      {
+        await db.ExecuteAsync(setSchemaSql, transaction: tx);
+      }
+
+      MarkSynced(syncKey);
     }
-
-    SchemaSyncLogger.Write();
-
-    var setSchemaSql = activeDialect.SetSchemaSql(_schema);
-    if (!string.IsNullOrWhiteSpace(setSchemaSql))
+    finally
     {
-      await db.ExecuteAsync(setSchemaSql, transaction: tx);
+      SyncGate.Release();
     }
+  }
+
+  private static void EnsureTransactionConnectionMatches(IDbConnection db, IDbTransaction tx)
+  {
+    if (tx.Connection != null && !ReferenceEquals(tx.Connection, db))
+      throw new InvalidOperationException("The provided transaction does not belong to the provided connection.");
+  }
+
+  private static string BuildSyncKey(IDbConnection db, ISqlDialect dialect, string schema)
+  {
+    var database = string.IsNullOrWhiteSpace(db.Database) ? "(unknown-db)" : db.Database;
+    return $"{dialect.Name}|{database}|{schema}";
+  }
+
+  private static bool IsSynced(string key)
+  {
+    lock (SyncedKeysGate)
+      return SyncedKeys.Contains(key);
+  }
+
+  private static void MarkSynced(string key)
+  {
+    lock (SyncedKeysGate)
+      SyncedKeys.Add(key);
   }
 
   private static async Task<string> DetectSchemaAsync(IDbConnection db, IDbTransaction tx, ISqlDialect dialect)
@@ -98,11 +136,7 @@ internal sealed class TableSyncStep : ISchemaSyncStep
     ISqlDialect dialect)
   {
     var exists = await db.ExecuteScalarAsync<bool>(
-      @"SELECT EXISTS (
-          SELECT 1 FROM information_schema.tables
-          WHERE table_schema = @schema
-          AND table_name = @table
-        )",
+      dialect.BuildTableExistsSql(),
       new { schema, table = tableName },
       tx
     );

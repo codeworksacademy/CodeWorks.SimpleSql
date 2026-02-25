@@ -29,6 +29,31 @@ public class SqlHelperTests
   }
 
   [Fact]
+  public void BuildPaging_ForSqlServer_UsesOffsetFetchSyntax()
+  {
+    var result = SqlHelper.BuildPaging(
+      limit: 25,
+      offset: 10,
+      dialect: SqlDialects.SqlServer
+    );
+
+    Assert.Equal("OFFSET 10 ROWS FETCH NEXT 25 ROWS ONLY", result);
+  }
+
+  [Fact]
+  public void BuildPaging_ForSqlServer_AddsFallbackOrderByWhenRequested()
+  {
+    var result = SqlHelper.BuildPaging(
+      limit: 25,
+      offset: 0,
+      dialect: SqlDialects.SqlServer,
+      forceOrderByForSqlServer: true
+    );
+
+    Assert.Equal("ORDER BY (SELECT 1) OFFSET 0 ROWS FETCH NEXT 25 ROWS ONLY", result);
+  }
+
+  [Fact]
   public void BuildFilter_ForSqlServer_UsesPortableLikeParameter()
   {
     var parameters = new DynamicParameters();

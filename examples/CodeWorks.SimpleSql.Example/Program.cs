@@ -3,6 +3,7 @@ using Dapper;
 using Npgsql;
 
 var connectionString = "Host=localhost;Database=TestDb;Username=postgres;Password=localdb;";
+connectionString = Environment.GetEnvironmentVariable("SIMPLESQL_EXAMPLE_CONNECTION") ?? connectionString;
 if (string.IsNullOrWhiteSpace(connectionString))
 {
   Console.WriteLine("Set SIMPLESQL_EXAMPLE_CONNECTION to a PostgreSQL connection string.");
@@ -19,7 +20,13 @@ await using var tx = await db.BeginTransactionAsync();
 await SchemaSync.SyncModelsAsync(
   db,
   tx,
-  [typeof(ExampleCustomer), typeof(ExampleOrder), typeof(ExampleMonthlyRevenue)],
+  [
+    typeof(ExampleCustomer),
+    typeof(ExampleOrder),
+    typeof(ExampleMonthlyRevenue),
+    typeof(ExampleTeam),
+    typeof(ExampleRepresentative)
+  ],
   options: new SchemaSyncOptions
   {
     LogPath = Path.Combine(AppContext.BaseDirectory, "logs", "db-sync.log"),
@@ -78,10 +85,25 @@ var hasArchived = await session
   .Where(x => x.Status == "archived")
   .AnyAsync(tx);
 
+var publicOrders = await session
+  .Set<ExampleOrder>()
+  .Include<ExampleCustomer>(x => x.Customer, alias: "cust")
+  .Where(x => x.Status == "active")
+  .Select<ExampleOrderPublicProjection>()
+  .ToListAsync(tx);
+
+var teamViews = await session
+  .Set<ExampleTeam>()
+  .Include<ExampleRepresentative>(x => x.Representative, alias: "rep")
+  .Select<ExampleTeamProjectionByType>()
+  .ToListAsync(tx);
+
 await tx.CommitAsync();
 
 Console.WriteLine($"Inserted/updated customer + orders. Active orders: {activeCount}, has archived: {hasArchived}");
 Console.WriteLine($"Loaded {activeOrders.Count} active orders (with include SQL path).");
+Console.WriteLine($"Loaded {publicOrders.Count} projection rows with alias disambiguation.");
+Console.WriteLine($"Loaded {teamViews.Count} projection rows with type disambiguation.");
 
 [DbTable("example_customers")]
 public sealed class ExampleCustomer
@@ -110,6 +132,16 @@ public sealed class ExampleOrder
   public ExampleCustomer? Customer { get; set; }
 }
 
+public sealed class ExampleOrderPublicProjection
+{
+  [DbColumn("status")]
+  public string Status { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource("cust")]
+  public string CustomerName { get; set; } = string.Empty;
+}
+
 [DbTable("example_monthly_revenue")]
 [DbConstraint("CONSTRAINT uq_example_monthly_revenue UNIQUE (business_id, year, month)")]
 public sealed class ExampleMonthlyRevenue
@@ -120,4 +152,41 @@ public sealed class ExampleMonthlyRevenue
   public int Year { get; set; }
   public int Month { get; set; }
   public decimal Revenue { get; set; }
+}
+
+[DbTable("example_teams")]
+public sealed class ExampleTeam
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+
+  [DbColumn("representative_id")]
+  public Guid RepresentativeId { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(ExampleRepresentative), nameof(RepresentativeId), nameof(ExampleRepresentative.Id), Alias = "rep")]
+  public ExampleRepresentative? Representative { get; set; }
+}
+
+[DbTable("example_representatives")]
+public sealed class ExampleRepresentative
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+public sealed class ExampleTeamProjectionByType
+{
+  [DbColumn("name")]
+  [ProjectionSource(typeof(ExampleTeam))]
+  public string TeamName { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource(typeof(ExampleRepresentative))]
+  public string RepresentativeName { get; set; } = string.Empty;
 }

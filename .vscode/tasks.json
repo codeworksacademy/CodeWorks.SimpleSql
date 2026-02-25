@@ -1,14 +1,23 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "release: bump and publish next",
-      "type": "shell",
-      "command": "./scripts/release-next.sh",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
-    }
-  ]
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "release: bump and publish next",
+            "type": "shell",
+            "command": "./scripts/release-next.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "build mvc example",
+            "type": "shell",
+            "command": "dotnet build ${workspaceFolder}/examples/CodeWorks.SimpleSql.MvcApi.Example/CodeWorks.SimpleSql.MvcApi.Example.csproj",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
 }

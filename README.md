@@ -6,6 +6,7 @@
 - Dialect support for PostgreSQL and SQL Server
 - Convention + attribute-based mapping
 - Schema synchronization helpers for tables, columns, indexes, and constraints
+- Repository-style `DbSet<T>` query/write abstraction over Dapper
 
 ## Install
 
@@ -13,23 +14,22 @@
 dotnet add package CodeWorks.SimpleSql
 ```
 
-  new[] { typeof(MyEntity), typeof(AnotherEntity) },
-  options: new SchemaSyncOptions
-  {
-    LogPath = "/absolute/path/to/db-sync.log",
-    EnableConsoleLogging = true
-  }
+## Quick start
 
 ```csharp
-`LogPath` is optional; when omitted, no log file is written.
 SqlHelper.UseDialect(SqlDialects.Postgres);
 
 var sql = SqlHelper.For<MyEntity>();
+var insertColumns = sql.InsertColumns;
+var insertValues = sql.InsertValues;
 ```
 
 ## Query + repository-style usage
 
 ```csharp
+using var db = /* your IDbConnection */;
+var session = new SqlSession(db);
+
 var orders = await session
   .Set<Order>()
   .Where(x => x.Status == "active")
@@ -53,6 +53,38 @@ var any = await session
   .AnyAsync();
 ```
 
+### Full model vs projection model (same table)
+
+```csharp
+[DbTable("accounts")]
+public class Account
+{
+  public Guid Id { get; set; }
+  public string Email { get; set; } = string.Empty;
+
+  [DbColumn("display_name")]
+  public string DisplayName { get; set; } = string.Empty;
+}
+
+[DbTable("accounts")]
+public class PublicProfile
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("display_name")]
+  public string DisplayName { get; set; } = string.Empty;
+}
+
+var profiles = await session
+  .Set<Account>()
+  .Where(x => x.Active)
+  .Select<PublicProfile>()
+  .ToListAsync();
+```
+
+`Select<TProjection>()` builds SQL from the projection model and only selects mapped projection fields.
+Projection selection respects `[IgnoreSelect]` on the projection type.
+
 ### Relationship include
 
 ```csharp
@@ -62,6 +94,31 @@ var withCustomer = await session
   .Where(x => x.Status == "active")
   .ToListAsync();
 ```
+
+Projected queries with `Include(...)` are supported for root + included selectable columns.
+When a projection column exists on multiple sources, add `[ProjectionSource(...)]` on the projection property.
+
+```csharp
+public class AccountSummaryProjection
+{
+  [DbColumn("name")]
+  [ProjectionSource("owner")]
+  public string OwnerName { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource("manager")]
+  public string ManagerName { get; set; } = string.Empty;
+}
+
+var result = await session
+  .Set<Account>()
+  .Include<User>(x => x.Owner, alias: "owner")
+  .Include<User>(x => x.Manager, alias: "manager")
+  .Select<AccountSummaryProjection>()
+  .ToListAsync();
+```
+
+`ProjectionSource` can target an include alias (`"owner"`) or a model type (`typeof(User)`) when only one source of that type exists.
 
 ### Upsert / UpsertMany
 
@@ -91,15 +148,67 @@ await session
 await SchemaSync.SyncModelsAsync(
   db,
   tx,
-  new[] { typeof(MyEntity), typeof(AnotherEntity) }
+  new[] { typeof(MyEntity), typeof(AnotherEntity) },
+  options: new SchemaSyncOptions
+  {
+    LogPath = "/absolute/path/to/db-sync.log",
+    EnableConsoleLogging = true
+  }
 );
 ```
+
+`LogPath` is optional; when omitted, no file is written.
+
+## Operational notes
+
+- Connection pooling is provided by your database provider, not by this library.
+- For PostgreSQL in production, prefer a shared `NpgsqlDataSource` and open scoped connections from it.
+- Keep related write operations inside a single `IDbTransaction` and pass the same transaction object to all calls.
+- `DbSet<T>` and `SchemaSync` enforce transaction/connection matching and throw if a transaction from a different connection is supplied.
+
+## Example project (real DB)
+
+Use [examples/CodeWorks.SimpleSql.Example/Program.cs](examples/CodeWorks.SimpleSql.Example/Program.cs) to test features against PostgreSQL.
+
+```bash
+export SIMPLESQL_EXAMPLE_CONNECTION="Host=localhost;Port=5432;Database=app_db;Username=postgres;Password=postgres"
+dotnet run --project examples/CodeWorks.SimpleSql.Example/CodeWorks.SimpleSql.Example.csproj
+```
+
+## MVC Web API example
+
+A traditional controller-based API sample is available at:
+
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs)
+
+It demonstrates:
+
+- pooled connection usage via `NpgsqlDataSource`
+- schema sync at startup
+- repository pattern + controller endpoints
+- projection models (`Select<TProjection>()`)
+- include disambiguation with `[ProjectionSource("alias")]`
+- upsert writes inside explicit transaction scope
+
+Run it:
+
+```bash
+export SIMPLESQL_EXAMPLE_CONNECTION="Host=localhost;Port=5432;Database=app_db;Username=postgres;Password=postgres"
+dotnet run --project examples/CodeWorks.SimpleSql.MvcApi.Example/CodeWorks.SimpleSql.MvcApi.Example.csproj
+```
+
+Sample endpoints:
+
+- `GET /api/accounts/profiles`
+- `GET /api/accounts/summaries`
+- `POST /api/accounts/upsert`
 
 ## Build, test, pack
 
 ```bash
 dotnet test
-
 dotnet pack -c Release
 ```
 

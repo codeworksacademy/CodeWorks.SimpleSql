@@ -164,6 +164,260 @@ public class DbSetTests
 
     Assert.Equal(sqlA, sqlB);
   }
+
+  [Fact]
+  public async Task ToListAsync_Throws_WhenTransactionConnectionDoesNotMatch()
+  {
+    var db = new FakeConnection();
+    var otherDb = new FakeConnection();
+    var tx = new FakeTransaction(otherDb);
+
+    var dbSet = new DbSet<RepoOrder>(db, SqlDialects.Postgres)
+      .Where(x => x.Status == "active");
+
+    var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => dbSet.ToListAsync(tx));
+    Assert.Contains("does not belong to the DbSet connection", ex.Message);
+  }
+
+  [Fact]
+  public void ToCompiledQuery_ForSqlServerPaging_UsesOffsetFetchAndFallbackOrderBy()
+  {
+    var dbSet = new DbSet<RepoOrder>(new FakeConnection(), SqlDialects.SqlServer)
+      .Where(x => x.Status == "active")
+      .Page(1, 10);
+
+    var compiled = dbSet.ToCompiledQuery();
+
+    Assert.Contains("ORDER BY (SELECT 1) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY", compiled.Sql);
+  }
+
+  [Fact]
+  public void ToCompiledQuery_ForSqlServerPaging_WithOrderBy_DoesNotUseFallbackOrderBy()
+  {
+    var dbSet = new DbSet<RepoOrder>(new FakeConnection(), SqlDialects.SqlServer)
+      .Where(x => x.Status == "active")
+      .OrderBy(x => x.CreatedAt)
+      .Page(2, 10);
+
+    var compiled = dbSet.ToCompiledQuery();
+
+    Assert.Contains("ORDER BY t0.[created_at] ASC OFFSET 10 ROWS FETCH NEXT 10 ROWS ONLY", compiled.Sql);
+    Assert.DoesNotContain("ORDER BY (SELECT 1)", compiled.Sql);
+  }
+
+  [Fact]
+  public void SelectProjection_SameTable_LimitsSelectedColumns()
+  {
+    var query = new DbSet<AccountRecord>(new FakeConnection(), SqlDialects.Postgres)
+      .Where(x => x.Active)
+      .Select<PublicProfile>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("SELECT t0.\"id\" AS \"Id\", t0.\"display_name\" AS \"DisplayName\"", compiled.Sql);
+    Assert.DoesNotContain("email", compiled.Sql, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("FROM \"accounts\" t0", compiled.Sql);
+    Assert.Contains("WHERE t0.\"active\"", compiled.Sql);
+  }
+
+  [Fact]
+  public void SelectProjection_WithInclude_ThrowsNotSupported()
+  {
+    var query = new DbSet<RepoOrder>(new FakeConnection(), SqlDialects.Postgres)
+      .Include<RepoCustomer>(x => x.Customer)
+      .Select<OrderWithCustomerProfile>();
+
+    var compiled = query.ToCompiledQuery();
+    Assert.Contains("c1.\"name\" AS \"CustomerName\"", compiled.Sql);
+    Assert.Contains("t0.\"status\" AS \"Status\"", compiled.Sql);
+  }
+
+  [Fact]
+  public void SelectProjection_RespectsIgnoreSelectOnProjectionType()
+  {
+    var query = new DbSet<AccountRecord>(new FakeConnection(), SqlDialects.Postgres)
+      .Select<PublicProfileWithHidden>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("t0.\"id\" AS \"Id\"", compiled.Sql);
+    Assert.Contains("t0.\"display_name\" AS \"DisplayName\"", compiled.Sql);
+    Assert.DoesNotContain("AS \"Email\"", compiled.Sql);
+  }
+
+  [Fact]
+  public void SelectProjection_WithMultipleIncludeSources_ThrowsWhenAmbiguousWithoutHint()
+  {
+    var query = new DbSet<CollisionOrder>(new FakeConnection(), SqlDialects.Postgres)
+      .Include<CollisionCustomer>(x => x.Customer, alias: "cust")
+      .Include<CollisionRepresentative>(x => x.Representative, alias: "rep")
+      .Select<CollisionProjectionAmbiguous>();
+
+    var ex = Assert.Throws<InvalidOperationException>(() => query.ToCompiledQuery());
+    Assert.Contains("ambiguous", ex.Message, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public void SelectProjection_WithProjectionSourceAlias_ResolvesColumnCollisions()
+  {
+    var query = new DbSet<CollisionOrder>(new FakeConnection(), SqlDialects.Postgres)
+      .Include<CollisionCustomer>(x => x.Customer, alias: "cust")
+      .Include<CollisionRepresentative>(x => x.Representative, alias: "rep")
+      .Select<CollisionProjectionResolved>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("cust.\"name\" AS \"CustomerName\"", compiled.Sql);
+    Assert.Contains("rep.\"name\" AS \"RepresentativeName\"", compiled.Sql);
+  }
+
+  [Fact]
+  public void SelectProjection_WithProjectionSourceType_ResolvesRootVsIncludeCollision()
+  {
+    var query = new DbSet<TypeCollisionOrder>(new FakeConnection(), SqlDialects.Postgres)
+      .Include<TypeCollisionCustomer>(x => x.Customer, alias: "cust")
+      .Select<TypeCollisionProjectionByType>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("t0.\"name\" AS \"OrderName\"", compiled.Sql);
+    Assert.Contains("cust.\"name\" AS \"CustomerName\"", compiled.Sql);
+  }
+}
+
+[DbTable("accounts")]
+public sealed class AccountRecord
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("display_name")]
+  public string DisplayName { get; set; } = string.Empty;
+
+  public string Email { get; set; } = string.Empty;
+  public bool Active { get; set; }
+}
+
+[DbTable("accounts")]
+public sealed class PublicProfile
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("display_name")]
+  public string DisplayName { get; set; } = string.Empty;
+}
+
+[DbTable("accounts")]
+public sealed class PublicProfileWithHidden
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("display_name")]
+  public string DisplayName { get; set; } = string.Empty;
+
+  [IgnoreSelect]
+  public string Email { get; set; } = string.Empty;
+}
+
+public sealed class OrderWithCustomerProfile
+{
+  public string Status { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  public string CustomerName { get; set; } = string.Empty;
+}
+
+[DbTable("collision_orders")]
+public sealed class CollisionOrder
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("customer_id")]
+  public Guid CustomerId { get; set; }
+
+  [DbColumn("representative_id")]
+  public Guid RepresentativeId { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(CollisionCustomer), nameof(CustomerId), nameof(CollisionCustomer.Id), Alias = "cust")]
+  public CollisionCustomer? Customer { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(CollisionRepresentative), nameof(RepresentativeId), nameof(CollisionRepresentative.Id), Alias = "rep")]
+  public CollisionRepresentative? Representative { get; set; }
+}
+
+[DbTable("collision_customers")]
+public sealed class CollisionCustomer
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+[DbTable("collision_representatives")]
+public sealed class CollisionRepresentative
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+public sealed class CollisionProjectionAmbiguous
+{
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+public sealed class CollisionProjectionResolved
+{
+  [DbColumn("name")]
+  [ProjectionSource("cust")]
+  public string CustomerName { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource("rep")]
+  public string RepresentativeName { get; set; } = string.Empty;
+}
+
+[DbTable("type_collision_orders")]
+public sealed class TypeCollisionOrder
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+
+  [DbColumn("customer_id")]
+  public Guid CustomerId { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(TypeCollisionCustomer), nameof(CustomerId), nameof(TypeCollisionCustomer.Id), Alias = "cust")]
+  public TypeCollisionCustomer? Customer { get; set; }
+}
+
+[DbTable("type_collision_customers")]
+public sealed class TypeCollisionCustomer
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+public sealed class TypeCollisionProjectionByType
+{
+  [DbColumn("name")]
+  [ProjectionSource(typeof(TypeCollisionOrder))]
+  public string OrderName { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource(typeof(TypeCollisionCustomer))]
+  public string CustomerName { get; set; } = string.Empty;
 }
 
 [DbTable("repo_orders")]
@@ -203,5 +457,14 @@ internal sealed class FakeConnection : IDbConnection
   public void Close() { }
   public IDbCommand CreateCommand() => throw new NotSupportedException();
   public void Open() { }
+  public void Dispose() { }
+}
+
+internal sealed class FakeTransaction(IDbConnection connection) : IDbTransaction
+{
+  public IDbConnection Connection => connection;
+  public IsolationLevel IsolationLevel => IsolationLevel.ReadCommitted;
+  public void Commit() { }
+  public void Rollback() { }
   public void Dispose() { }
 }

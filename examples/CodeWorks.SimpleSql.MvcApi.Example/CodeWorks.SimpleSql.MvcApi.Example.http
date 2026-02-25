@@ -1,0 +1,36 @@
+@host = http://localhost:5000
+@contentType = application/json
+
+### Health check (if app is running)
+GET {{host}}/
+Accept: {{contentType}}
+
+### List projected public profiles
+GET {{host}}/api/accounts/profiles
+Accept: {{contentType}}
+
+### List include + projection summaries
+GET {{host}}/api/accounts/summaries
+Accept: {{contentType}}
+
+### Upsert an account (create/update)
+POST {{host}}/api/accounts/upsert
+Content-Type: {{contentType}}
+Accept: {{contentType}}
+
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "email": "dog@example.com",
+  "displayName": "fido",
+  "active": true,
+  "ownerId": "6c8911a8-96ed-427e-9342-ca4c5e842477",
+  "managerId": "e0f69155-f755-4300-bbeb-ac94f15f1e79"
+}
+
+### Re-check profiles after upsert
+GET {{host}}/api/accounts/profiles
+Accept: {{contentType}}
+
+### Re-check summaries after upsert
+GET {{host}}/api/accounts/summaries
+Accept: {{contentType}}

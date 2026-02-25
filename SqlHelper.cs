@@ -649,6 +649,32 @@ public static class SqlHelper
 
   public static string BuildPaging(int? limit, int? offset)
   {
+    return BuildPaging(limit, offset, Dialect);
+  }
+
+  public static string BuildPaging(
+      int? limit,
+      int? offset,
+      ISqlDialect? dialect,
+      bool forceOrderByForSqlServer = false)
+  {
+    var activeDialect = dialect ?? Dialect;
+
+    if (string.Equals(activeDialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase))
+    {
+      if (!limit.HasValue && !offset.HasValue)
+        return string.Empty;
+
+      var normalizedOffset = Math.Max(offset ?? 0, 0);
+      var normalizedLimit = limit.HasValue ? Math.Clamp(limit.Value, 1, 500) : (int?)null;
+      var orderBy = forceOrderByForSqlServer ? "ORDER BY (SELECT 1) " : string.Empty;
+
+      if (normalizedLimit.HasValue)
+        return $"{orderBy}OFFSET {normalizedOffset} ROWS FETCH NEXT {normalizedLimit.Value} ROWS ONLY";
+
+      return $"{orderBy}OFFSET {normalizedOffset} ROWS";
+    }
+
     var clauses = new List<string>();
     if (limit.HasValue) clauses.Add($"LIMIT {Math.Clamp(limit.Value, 1, 500)}");
     if (offset.HasValue) clauses.Add($"OFFSET {Math.Max(offset.Value, 0)}");
@@ -742,6 +768,23 @@ public sealed class IgnoreSelectAttribute : Attribute { }
 
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class JsonColumnAttribute : Attribute { }
+
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class ProjectionSourceAttribute : Attribute
+{
+  public Type? ModelType { get; }
+  public string? Alias { get; }
+
+  public ProjectionSourceAttribute(Type modelType)
+  {
+    ModelType = modelType;
+  }
+
+  public ProjectionSourceAttribute(string alias)
+  {
+    Alias = alias;
+  }
+}
 
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class DbColumnAttribute : Attribute

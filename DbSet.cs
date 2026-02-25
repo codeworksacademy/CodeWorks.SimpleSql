@@ -1,4 +1,5 @@
 using System.Data;
+using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
@@ -17,6 +18,7 @@ public interface IDbSet<T>
   IDbSet<T> Include<TJoin>(Expression<Func<T, object?>> navigation, SqlJoinType joinType = SqlJoinType.Left, string? alias = null);
   IDbSet<T> OrderBy(Expression<Func<T, object>> expression, bool desc = false);
   IDbSet<T> Page(int page, int size);
+  IProjectedDbSet<TProjection> Select<TProjection>();
   Task<List<T>> ToListAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
   Task<T?> FirstOrDefaultAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
   Task<int> CountAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
@@ -24,6 +26,14 @@ public interface IDbSet<T>
   Task<int> UpsertAsync(T entity, Expression<Func<T, object>> keySelector, IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
   Task<int> UpsertManyAsync(IEnumerable<T> entities, Expression<Func<T, object>> keySelector, int batchSize = 200, IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
   CompiledQuery ToUpsertCompiledQuery(T entity, Expression<Func<T, object>> keySelector);
+  CompiledQuery ToCompiledQuery();
+  CompiledQuery ToCompiledQuery(SqlQueryResultMode mode);
+}
+
+public interface IProjectedDbSet<TProjection>
+{
+  Task<List<TProjection>> ToListAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
+  Task<TProjection?> FirstOrDefaultAsync(IDbTransaction? transaction = null, CancellationToken cancellationToken = default);
   CompiledQuery ToCompiledQuery();
   CompiledQuery ToCompiledQuery(SqlQueryResultMode mode);
 }
@@ -82,6 +92,9 @@ public sealed class DbSet<T> : IDbSet<T>
     return new DbSet<T>(_db, _dialect, _model.SetPaging(page, size));
   }
 
+  public IProjectedDbSet<TProjection> Select<TProjection>() =>
+    new ProjectedDbSet<T, TProjection>(_db, _dialect, _model);
+
   public CompiledQuery ToCompiledQuery() => ToCompiledQuery(SqlQueryResultMode.List);
 
   public CompiledQuery ToCompiledQuery(SqlQueryResultMode mode) => SqlQueryCompiler.Compile(_model, _dialect, mode);
@@ -90,6 +103,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     var compiled = ToCompiledQuery();
     var command = new CommandDefinition(
       compiled.Sql,
@@ -105,6 +120,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     var compiled = ToCompiledQuery(SqlQueryResultMode.First);
     var command = new CommandDefinition(
       compiled.Sql,
@@ -119,6 +136,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     var compiled = ToCompiledQuery(SqlQueryResultMode.Count);
     var command = new CommandDefinition(
       compiled.Sql,
@@ -133,6 +152,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     var compiled = ToCompiledQuery(SqlQueryResultMode.Exists);
     var command = new CommandDefinition(
       compiled.Sql,
@@ -152,6 +173,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     var compiled = ToUpsertCompiledQuery(entity, keySelector);
     var command = new CommandDefinition(
       compiled.Sql,
@@ -169,6 +192,8 @@ public sealed class DbSet<T> : IDbSet<T>
     IDbTransaction? transaction = null,
     CancellationToken cancellationToken = default)
   {
+    EnsureTransactionConnectionMatches(transaction);
+
     ArgumentNullException.ThrowIfNull(entities);
     if (batchSize < 1)
       throw new ArgumentOutOfRangeException(nameof(batchSize));
@@ -196,6 +221,70 @@ public sealed class DbSet<T> : IDbSet<T>
     }
 
     return total;
+  }
+
+  private void EnsureTransactionConnectionMatches(IDbTransaction? transaction)
+  {
+    if (transaction?.Connection != null && !ReferenceEquals(transaction.Connection, _db))
+      throw new InvalidOperationException("The provided transaction does not belong to the DbSet connection.");
+  }
+}
+
+public sealed class ProjectedDbSet<TRoot, TProjection> : IProjectedDbSet<TProjection>
+{
+  private readonly IDbConnection _db;
+  private readonly ISqlDialect _dialect;
+  private readonly SqlQueryModel _model;
+
+  internal ProjectedDbSet(IDbConnection db, ISqlDialect dialect, SqlQueryModel model)
+  {
+    _db = db;
+    _dialect = dialect;
+    _model = model;
+  }
+
+  public CompiledQuery ToCompiledQuery() => ToCompiledQuery(SqlQueryResultMode.List);
+
+  public CompiledQuery ToCompiledQuery(SqlQueryResultMode mode) =>
+    SqlQueryCompiler.CompileProjected<TRoot, TProjection>(_model, _dialect, mode);
+
+  public async Task<List<TProjection>> ToListAsync(
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    EnsureTransactionConnectionMatches(transaction);
+
+    var compiled = ToCompiledQuery(SqlQueryResultMode.List);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    var rows = await _db.QueryAsync<TProjection>(command);
+    return rows.ToList();
+  }
+
+  public async Task<TProjection?> FirstOrDefaultAsync(
+    IDbTransaction? transaction = null,
+    CancellationToken cancellationToken = default)
+  {
+    EnsureTransactionConnectionMatches(transaction);
+
+    var compiled = ToCompiledQuery(SqlQueryResultMode.First);
+    var command = new CommandDefinition(
+      compiled.Sql,
+      compiled.Parameters,
+      transaction: transaction,
+      cancellationToken: cancellationToken);
+
+    return await _db.QueryFirstOrDefaultAsync<TProjection>(command);
+  }
+
+  private void EnsureTransactionConnectionMatches(IDbTransaction? transaction)
+  {
+    if (transaction?.Connection != null && !ReferenceEquals(transaction.Connection, _db))
+      throw new InvalidOperationException("The provided transaction does not belong to the DbSet connection.");
   }
 }
 
@@ -274,6 +363,8 @@ internal sealed class SqlQueryModel
 
 internal static class SqlQueryCompiler
 {
+  private static readonly ConcurrentDictionary<string, string> ProjectionSelectCache = new();
+
   public static CompiledQuery Compile(
     SqlQueryModel model,
     ISqlDialect dialect,
@@ -312,7 +403,18 @@ internal static class SqlQueryCompiler
       ? string.Empty
       : " ORDER BY " + string.Join(", ", orderParts);
 
-    var pagingSql = SqlHelper.BuildPaging(model.Limit, model.Offset);
+    var hasPaging = model.Limit.HasValue || model.Offset.HasValue;
+    var sqlServerPagingNeedsOrderFallback =
+      hasPaging
+      && orderParts.Count == 0
+      && string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase);
+
+    var pagingSql = SqlHelper.BuildPaging(
+      model.Limit,
+      model.Offset,
+      dialect,
+      forceOrderByForSqlServer: sqlServerPagingNeedsOrderFallback);
+
     var paging = string.IsNullOrWhiteSpace(pagingSql) ? string.Empty : " " + pagingSql;
 
     var baseQuerySql = $"{selectSql} {fromSql}{whereSql}";
@@ -326,6 +428,202 @@ internal static class SqlQueryCompiler
     };
 
     return new CompiledQuery(sql, parameters);
+  }
+
+  public static CompiledQuery CompileProjected<TRoot, TProjection>(
+    SqlQueryModel model,
+    ISqlDialect dialect,
+    SqlQueryResultMode mode = SqlQueryResultMode.List)
+  {
+    if (model.RootType != typeof(TRoot))
+      throw new InvalidOperationException("Projection root type mismatch.");
+
+    if (mode is not (SqlQueryResultMode.List or SqlQueryResultMode.First))
+      throw new NotSupportedException("Projected queries currently support only List and First modes.");
+
+    var parameters = new DynamicParameters();
+    var query = CreateTypedQuery(model.RootType, dialect);
+    foreach (var include in model.Includes)
+      query = ApplyInclude(query, include);
+
+    var fromSql = (string)(query.GetType()
+      .GetMethod(nameof(SqlQuery<object>.BuildFrom))
+      ?.Invoke(query, null)
+      ?? throw new InvalidOperationException("Failed to build projected FROM SQL."));
+
+    var whereParts = model.Wheres
+      .Select(w => SqlExpressionBuilder.Build(w, SQLMapper.Get(model.RootType), parameters, "t0", dialect).Replace("WHERE ", string.Empty))
+      .Where(w => !string.IsNullOrWhiteSpace(w))
+      .ToList();
+
+    var whereSql = whereParts.Count == 0
+      ? string.Empty
+      : " WHERE " + string.Join(" AND ", whereParts);
+
+    var orderParts = model.Orders
+      .Select(o => SqlHelper.BuildOrderBy(o.Expression, model.RootType, "t0", o.Desc, dialect))
+      .ToList();
+
+    var orderSql = orderParts.Count == 0
+      ? string.Empty
+      : " ORDER BY " + string.Join(", ", orderParts);
+
+    var hasPaging = model.Limit.HasValue || model.Offset.HasValue;
+    var sqlServerPagingNeedsOrderFallback =
+      hasPaging
+      && orderParts.Count == 0
+      && string.Equals(dialect.Name, "sqlserver", StringComparison.OrdinalIgnoreCase);
+
+    var pagingSql = SqlHelper.BuildPaging(
+      model.Limit,
+      model.Offset,
+      dialect,
+      forceOrderByForSqlServer: sqlServerPagingNeedsOrderFallback);
+
+    var paging = string.IsNullOrWhiteSpace(pagingSql) ? string.Empty : " " + pagingSql;
+
+    var selectSql = BuildProjectionSelectSql(model.RootType, model.Includes, typeof(TProjection), dialect, "t0");
+    var baseQuerySql = $"{selectSql} {fromSql}{whereSql}";
+
+    var sql = mode switch
+    {
+      SqlQueryResultMode.List => $"{baseQuerySql}{orderSql}{paging}",
+      SqlQueryResultMode.First => BuildFirstSql(baseQuerySql, orderSql, dialect),
+      _ => throw new NotSupportedException("Unsupported projection query mode")
+    };
+
+    return new CompiledQuery(sql, parameters);
+  }
+
+  private static string BuildProjectionSelectSql(
+    Type rootType,
+    IReadOnlyList<IncludeSpec> includes,
+    Type projectionType,
+    ISqlDialect dialect,
+    string alias)
+  {
+    var includeSignature = includes.Count == 0
+      ? "none"
+      : string.Join(";", includes.Select(i =>
+      {
+        var navName = ExtractPropertyInfo(i.Navigation).Name;
+        return $"{i.JoinType.FullName}:{i.JoinKind}:{i.Alias ?? "(auto)"}:{navName}";
+      }));
+
+    var cacheKey = $"{dialect.Name}|{rootType.FullName}|{projectionType.FullName}|{alias}|{includeSignature}";
+
+    return ProjectionSelectCache.GetOrAdd(cacheKey, _ =>
+    {
+      var projectionMap = SQLMapper.Get(projectionType);
+      var sources = BuildProjectionSources(rootType, includes, alias);
+
+      var selectColumns = new List<string>();
+      foreach (var projectionProp in projectionMap.Selectable)
+      {
+        var matches = sources
+          .SelectMany(source => source.Map.Selectable
+            .Where(prop => prop.Column.Equals(projectionProp.Column, StringComparison.OrdinalIgnoreCase))
+            .Select(prop => (source, prop)))
+          .ToList();
+
+        if (matches.Count == 0)
+          throw new InvalidOperationException(
+            $"Projection property '{projectionProp.Property.Name}' ({projectionProp.Column}) does not map to any selectable source in query root/includes.");
+
+        var selected = ResolveProjectionMatch(matches, projectionProp, rootType);
+
+        selectColumns.Add($"{selected.source.Alias}.{dialect.Quote(selected.prop.Column)} AS {dialect.Quote(projectionProp.Property.Name)}");
+      }
+
+      if (selectColumns.Count == 0)
+        throw new InvalidOperationException($"Projection type '{projectionType.Name}' has no selectable properties.");
+
+      return "SELECT " + string.Join(", ", selectColumns);
+    });
+  }
+
+  private static IReadOnlyList<ProjectionSource> BuildProjectionSources(
+    Type rootType,
+    IReadOnlyList<IncludeSpec> includes,
+    string rootAlias)
+  {
+    var sources = new List<ProjectionSource>
+    {
+      new(rootAlias, rootType, SQLMapper.Get(rootType))
+    };
+
+    for (var includeIndex = 0; includeIndex < includes.Count; includeIndex++)
+    {
+      var include = includes[includeIndex];
+      var navProp = ExtractPropertyInfo(include.Navigation);
+      var relation = navProp.GetCustomAttribute<DbRelationAttribute>()
+        ?? throw new InvalidOperationException($"Property {navProp.Name} is missing [DbRelation].");
+
+      if (relation.RelatedType != include.JoinType)
+        throw new InvalidOperationException($"[DbRelation] type mismatch on {navProp.Name}. Expected {include.JoinType.Name}.");
+
+      var resolvedAlias = include.Alias ?? relation.Alias ?? $"t{includeIndex + 1}";
+      if (sources.Any(s => string.Equals(s.Alias, resolvedAlias, StringComparison.OrdinalIgnoreCase)))
+        throw new InvalidOperationException($"Duplicate include alias '{resolvedAlias}' detected.");
+
+      sources.Add(new ProjectionSource(
+        resolvedAlias,
+        include.JoinType,
+        SQLMapper.Get(include.JoinType)));
+    }
+
+    return sources;
+  }
+
+  private static PropertyInfo ExtractPropertyInfo(LambdaExpression expression)
+  {
+    return expression.Body switch
+    {
+      MemberExpression m when m.Member is PropertyInfo p => p,
+      UnaryExpression { Operand: MemberExpression m } when m.Member is PropertyInfo p => p,
+      _ => throw new InvalidOperationException("Navigation expression must target a property.")
+    };
+  }
+
+  private readonly record struct ProjectionSource(string Alias, Type ModelType, SqlEntityMap Map);
+
+  private static (ProjectionSource source, SqlPropertyMap prop) ResolveProjectionMatch(
+    IReadOnlyList<(ProjectionSource source, SqlPropertyMap prop)> matches,
+    SqlPropertyMap projectionProp,
+    Type rootType)
+  {
+    var hint = projectionProp.Property.GetCustomAttribute<ProjectionSourceAttribute>();
+    if (hint != null)
+    {
+      var hintedMatches = matches.Where(m =>
+      {
+        var aliasMatch = !string.IsNullOrWhiteSpace(hint.Alias)
+          && string.Equals(m.source.Alias, hint.Alias, StringComparison.OrdinalIgnoreCase);
+
+        var typeMatch = hint.ModelType != null && m.source.ModelType == hint.ModelType;
+        return aliasMatch || typeMatch;
+      }).ToList();
+
+      if (hintedMatches.Count == 1)
+        return hintedMatches[0];
+
+      if (hintedMatches.Count == 0)
+        throw new InvalidOperationException(
+          $"Projection property '{projectionProp.Property.Name}' specifies [ProjectionSource] but no matching source was found.");
+
+      throw new InvalidOperationException(
+        $"Projection property '{projectionProp.Property.Name}' [ProjectionSource] matches multiple sources.");
+    }
+
+    var rootMatches = matches.Where(m => m.source.ModelType == rootType).ToList();
+    if (rootMatches.Count == 1)
+      return rootMatches[0];
+
+    if (matches.Count == 1)
+      return matches[0];
+
+    throw new InvalidOperationException(
+      $"Projection property '{projectionProp.Property.Name}' ({projectionProp.Column}) is ambiguous. Add [ProjectionSource(typeof(...))] or [ProjectionSource(\"alias\")].");
   }
 
   private static string BuildFirstSql(string baseQuerySql, string orderSql, ISqlDialect dialect)
