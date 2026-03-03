@@ -9,7 +9,9 @@
     <Description>Lightweight SQL helper + schema sync with no provider-specific package dependency.</Description>
     <PackageTags>sql;dapper;orm;schema;migration</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/codeworksacademy/CodeWorks.SimpleSql</PackageProjectUrl>
     <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/codeworksacademy/CodeWorks.SimpleSql.git</RepositoryUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

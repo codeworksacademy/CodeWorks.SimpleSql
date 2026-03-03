@@ -199,7 +199,7 @@ await SchemaSync.SyncModelsAsync(
 
 ## Example project (real DB)
 
-Use [examples/CodeWorks.SimpleSql.Example/Program.cs](examples/CodeWorks.SimpleSql.Example/Program.cs) to test features against PostgreSQL.
+Use [examples/CodeWorks.SimpleSql.Example/Program.cs](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/examples/CodeWorks.SimpleSql.Example/Program.cs) to test features against PostgreSQL.
 
 ```bash
 export SIMPLESQL_EXAMPLE_CONNECTION="Host=localhost;Port=5432;Database=app_db;Username=postgres;Password=postgres"
@@ -210,10 +210,10 @@ dotnet run --project examples/CodeWorks.SimpleSql.Example/CodeWorks.SimpleSql.Ex
 
 A traditional controller-based API sample is available at:
 
-- [examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs)
-- [examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs)
-- [examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs)
-- [examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs)
 
 It demonstrates:
 
@@ -249,7 +249,7 @@ dotnet pack -c Release
 
 ## Release automation (GitHub Actions)
 
-NuGet publish is automated via [.github/workflows/publish-nuget.yml](.github/workflows/publish-nuget.yml).
+NuGet publish is automated via [.github/workflows/publish-nuget.yml](https://github.com/codeworksacademy/CodeWorks.SimpleSql/blob/main/.github/workflows/publish-nuget.yml).
 
 - Trigger: push a git tag matching `v*` (example: `v0.1.1`)
 - Required repository secret: `NUGET_API_KEY`
