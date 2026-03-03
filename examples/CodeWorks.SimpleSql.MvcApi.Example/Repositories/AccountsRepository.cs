@@ -1,5 +1,4 @@
 using CodeWorks.SimpleSql;
-using Npgsql;
 
 namespace CodeWorks.SimpleSql.MvcApi.Example.Repositories;
 
@@ -12,12 +11,11 @@ public interface IAccountsRepository
     Task<List<Account>> GetRichAccountsAsync();
 }
 
-public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsRepository
+public sealed class AccountsRepository(ISqlConnectionAccessor connectionAccessor)
+  : BaseRepository(connectionAccessor), IAccountsRepository
 {
-    private readonly NpgsqlDataSource _dataSource = dataSource;
-
     public Task<List<PublicProfile>> GetPublicProfilesAsync() =>
-      WithSession(async session =>
+      WithSessionAsync(async session =>
         await session
           .Set<Account>()
           .Where(x => x.Active)
@@ -25,13 +23,13 @@ public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsR
           .ToListAsync());
 
     public Task<List<Account>> GetAccountsAsync() =>
-      WithSession(async session =>
+      WithSessionAsync(async session =>
         await session
           .Set<Account>()
           .ToListAsync());
 
     public Task<List<Account>> GetRichAccountsAsync() =>
-      WithSession(async session =>
+      WithSessionAsync(async session =>
         await session
           .Set<Account>()
           .Include<User>(x => x.Owner, alias: "owner")
@@ -39,7 +37,7 @@ public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsR
           .ToListAsync());
 
     public Task<List<AccountSummaryProjection>> GetAccountSummariesAsync() =>
-      WithSession(async session =>
+      WithSessionAsync(async session =>
         await session
           .Set<Account>()
           .Include<User>(x => x.Owner, alias: "owner")
@@ -48,30 +46,10 @@ public sealed class AccountsRepository(NpgsqlDataSource dataSource) : IAccountsR
           .ToListAsync());
 
     public Task UpsertAccountAsync(Account account) =>
-      WithConnection(async db =>
-      {
-          await using var tx = await db.BeginTransactionAsync();
-          var session = new SqlSession(db, SqlDialects.Postgres);
-
-          await session
+      WithTransactionAsync(async (session, tx) =>
+        await session
           .Set<Account>()
-          .UpsertAsync(account, x => x.Id, tx);
-
-          await tx.CommitAsync();
-      });
-
-    private async Task<List<T>> WithSession<T>(Func<SqlSession, Task<List<T>>> action)
-    {
-        await using var db = await _dataSource.OpenConnectionAsync();
-        var session = new SqlSession(db, SqlDialects.Postgres);
-        return await action(session);
-    }
-
-    private async Task WithConnection(Func<NpgsqlConnection, Task> action)
-    {
-        await using var db = await _dataSource.OpenConnectionAsync();
-        await action(db);
-    }
+          .UpsertAsync(account, x => x.Id, tx));
 }
 
 [DbTable("accounts")]

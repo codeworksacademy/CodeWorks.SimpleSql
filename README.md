@@ -53,6 +53,37 @@ var any = await session
   .AnyAsync();
 ```
 
+## Base repository + wide registration
+
+`BaseRepository` provides shared connection/session/transaction helpers for repositories.
+
+```csharp
+public interface IOrdersRepository
+{
+  Task<List<Order>> GetOpenAsync();
+}
+
+public sealed class OrdersRepository(ISqlConnectionAccessor accessor)
+  : BaseRepository(accessor), IOrdersRepository
+{
+  public Task<List<Order>> GetOpenAsync() =>
+    WithSessionAsync(session =>
+      session
+        .Set<Order>()
+        .Where(x => x.Status == "open")
+        .ToListAsync());
+}
+```
+
+Register all repositories (that inherit `BaseRepository`) from an assembly in one call:
+
+```csharp
+services.AddScoped<ISqlConnectionAccessor, MyConnectionAccessor>();
+services.AddBaseRepositoriesFromAssemblyContaining<OrdersRepository>();
+```
+
+This supports broad repository registration while keeping one-off query logic in derived repositories and business rules in a service layer.
+
 ### Full model vs projection model (same table)
 
 ```csharp
@@ -181,6 +212,7 @@ A traditional controller-based API sample is available at:
 
 - [examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Program.cs)
 - [examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Repositories/AccountsRepository.cs)
+- [examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Services/AccountsService.cs)
 - [examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs](examples/CodeWorks.SimpleSql.MvcApi.Example/Controllers/AccountsController.cs)
 
 It demonstrates:
@@ -188,6 +220,7 @@ It demonstrates:
 - pooled connection usage via `NpgsqlDataSource`
 - schema sync at startup
 - repository pattern + controller endpoints
+- service-layer orchestration for business rules
 - projection models (`Select<TProjection>()`)
 - include disambiguation with `[ProjectionSource("alias")]`
 - nested include materialization for object graphs (`Include(...).ToListAsync()`)

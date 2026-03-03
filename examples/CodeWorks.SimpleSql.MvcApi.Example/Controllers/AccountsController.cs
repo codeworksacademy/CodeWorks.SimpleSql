@@ -1,57 +1,57 @@
 using CodeWorks.SimpleSql.MvcApi.Example.Repositories;
+using CodeWorks.SimpleSql.MvcApi.Example.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace CodeWorks.SimpleSql.MvcApi.Example.Controllers;
 
 [ApiController]
 [Route("api/accounts")]
-public sealed class AccountsController(IAccountsRepository repository) : ControllerBase
+public sealed class AccountsController(IAccountsService service) : ControllerBase
 {
-    private readonly IAccountsRepository _repository = repository;
+    private readonly IAccountsService _service = service;
 
     [HttpGet]
     public async Task<ActionResult<List<Account>>> GetAll()
     {
-        List<Account> rows = await _repository.GetRichAccountsAsync();
+        List<Account> rows = await _service.GetRichAccountsAsync();
         return Ok(rows);
     }
 
         [HttpGet("rich")]
         public async Task<ActionResult<List<Account>>> GetRich()
         {
-            List<Account> rows = await _repository.GetRichAccountsAsync();
+            List<Account> rows = await _service.GetRichAccountsAsync();
             return Ok(rows);
         }
 
     [HttpGet("profiles")]
     public async Task<ActionResult<List<PublicProfile>>> GetProfiles()
     {
-        var rows = await _repository.GetPublicProfilesAsync();
+        var rows = await _service.GetPublicProfilesAsync();
         return Ok(rows);
     }
 
     [HttpGet("summaries")]
     public async Task<ActionResult<List<AccountSummaryProjection>>> GetSummaries()
     {
-        var rows = await _repository.GetAccountSummariesAsync();
+        var rows = await _service.GetAccountSummariesAsync();
         return Ok(rows);
     }
 
     [HttpPost("upsert")]
     public async Task<IActionResult> Upsert([FromBody] UpsertAccountRequest request)
     {
-        var row = new Account
+        var id = await _service.UpsertAccountAsync(new UpsertAccountInput
         {
-            Id = request.Id == Guid.Empty ? Guid.NewGuid() : request.Id,
+            Id = request.Id,
             Email = request.Email,
             DisplayName = request.DisplayName,
             Active = request.Active,
             OwnerId = request.OwnerId,
             ManagerId = request.ManagerId
-        };
+        });
 
-        await _repository.UpsertAccountAsync(row);
-        return Ok(new { row.Id });
+        return Ok(new { Id = id });
     }
 }
 

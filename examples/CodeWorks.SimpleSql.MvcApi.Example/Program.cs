@@ -1,5 +1,6 @@
 using CodeWorks.SimpleSql;
 using CodeWorks.SimpleSql.MvcApi.Example.Repositories;
+using CodeWorks.SimpleSql.MvcApi.Example.Services;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,7 +22,9 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
   ?? "Host=localhost;Database=TestDb;Username=postgres;Password=localdb;";
 
 builder.Services.AddSingleton(new NpgsqlDataSourceBuilder(connectionString).Build());
-builder.Services.AddScoped<IAccountsRepository, AccountsRepository>();
+builder.Services.AddScoped<ISqlConnectionAccessor, NpgsqlSqlConnectionAccessor>();
+builder.Services.AddBaseRepositoriesFromAssemblyContaining<AccountsRepository>();
+builder.Services.AddScoped<IAccountsService, AccountsService>();
 
 var app = builder.Build();
 
