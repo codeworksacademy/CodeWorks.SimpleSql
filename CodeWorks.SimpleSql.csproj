@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>CodeWorks.SimpleSql</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <Authors>CodeWorks</Authors>
     <Description>Lightweight SQL helper + schema sync with no provider-specific package dependency.</Description>
     <PackageTags>sql;dapper;orm;schema;migration</PackageTags>
