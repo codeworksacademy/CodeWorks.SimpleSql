@@ -38,6 +38,13 @@ public sealed class AccountsController(IAccountsService service) : ControllerBas
         return Ok(rows);
     }
 
+    [HttpGet("claimable-employees")]
+    public async Task<ActionResult<List<ClaimableEmployeeProjection>>> GetClaimableEmployees([FromQuery] string email)
+    {
+        var rows = await _service.GetClaimableEmployeesByEmailAsync(email);
+        return Ok(rows);
+    }
+
     [HttpPost("upsert")]
     public async Task<IActionResult> Upsert([FromBody] UpsertAccountRequest request)
     {

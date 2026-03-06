@@ -37,6 +37,16 @@ public class DbSetTests
   }
 
   [Fact]
+  public void ToCompiledQuery_WithIncludeMissingDbRelation_UnwrapsHelpfulException()
+  {
+    var dbSet = new DbSet<QueryOrderWithoutRelation>(new FakeConnection(), SqlDialects.Postgres)
+      .Include<QueryCustomer>(x => x.Customer);
+
+    var ex = Assert.Throws<InvalidOperationException>(() => dbSet.ToCompiledQuery());
+    Assert.Contains("missing [DbRelation]", ex.Message);
+  }
+
+  [Fact]
   public void DbSet_IsImmutable_WhenAddingWhereClause()
   {
     var original = new DbSet<RepoOrder>(new FakeConnection(), SqlDialects.Postgres);
@@ -283,6 +293,27 @@ public class DbSetTests
     Assert.Contains("t0.\"name\" AS \"OrderName\"", compiled.Sql);
     Assert.Contains("cust.\"name\" AS \"CustomerName\"", compiled.Sql);
   }
+
+  [Fact]
+  public void SelectProjection_EmployeeRecord_WithBusinessAndAccount_IncludesRequestedColumns()
+  {
+    var accountId = Guid.NewGuid();
+
+    var query = new DbSet<EmployeeRecord>(new FakeConnection(), SqlDialects.Postgres)
+      .Where(e => e.AccountId == accountId)
+      .Include<EmployeeBusiness>(e => e.Business, alias: "biz")
+      .Include<EmployeeAccount>(e => e.Account, alias: "acct")
+      .Select<EmployeeRecordProjection>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("LEFT JOIN \"employee_businesses\" biz ON t0.\"business_id\" = biz.\"id\"", compiled.Sql);
+    Assert.Contains("LEFT JOIN \"employee_accounts\" acct ON t0.\"account_id\" = acct.\"id\"", compiled.Sql);
+    Assert.Contains("biz.\"name\" AS \"BusinessName\"", compiled.Sql);
+    Assert.Contains("biz.\"logo\" AS \"BusinessLogo\"", compiled.Sql);
+    Assert.Contains("acct.\"name\" AS \"AccountName\"", compiled.Sql);
+    Assert.Contains("WHERE (t0.\"account_id\" = @p0)", compiled.Sql);
+  }
 }
 
 [DbTable("accounts")]
@@ -418,6 +449,66 @@ public sealed class TypeCollisionProjectionByType
   [DbColumn("name")]
   [ProjectionSource(typeof(TypeCollisionCustomer))]
   public string CustomerName { get; set; } = string.Empty;
+}
+
+[DbTable("employee_records")]
+public sealed class EmployeeRecord
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("account_id")]
+  public Guid AccountId { get; set; }
+
+  [DbColumn("business_id")]
+  public Guid BusinessId { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(EmployeeBusiness), nameof(BusinessId), nameof(EmployeeBusiness.Id), Alias = "biz")]
+  public EmployeeBusiness? Business { get; set; }
+
+  [IgnoreWrite]
+  [IgnoreSelect]
+  [DbRelation(typeof(EmployeeAccount), nameof(AccountId), nameof(EmployeeAccount.Id), Alias = "acct")]
+  public EmployeeAccount? Account { get; set; }
+}
+
+[DbTable("employee_businesses")]
+public sealed class EmployeeBusiness
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+
+  [DbColumn("logo")]
+  public string Logo { get; set; } = string.Empty;
+}
+
+[DbTable("employee_accounts")]
+public sealed class EmployeeAccount
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  public string Name { get; set; } = string.Empty;
+}
+
+public sealed class EmployeeRecordProjection
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("name")]
+  [ProjectionSource(typeof(EmployeeBusiness))]
+  public string BusinessName { get; set; } = string.Empty;
+
+  [DbColumn("logo")]
+  [ProjectionSource(typeof(EmployeeBusiness))]
+  public string BusinessLogo { get; set; } = string.Empty;
+
+  [DbColumn("name")]
+  [ProjectionSource(typeof(EmployeeAccount))]
+  public string AccountName { get; set; } = string.Empty;
 }
 
 [DbTable("repo_orders")]

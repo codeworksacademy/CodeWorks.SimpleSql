@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Dapper;
 
@@ -887,8 +888,16 @@ internal static class SqlQueryCompiler
 
     var genericInclude = method.MakeGenericMethod(include.JoinType);
 
-    return genericInclude.Invoke(query, [include.Navigation, include.JoinKind, include.Alias])
-      ?? throw new InvalidOperationException("Failed to apply include.");
+    try
+    {
+      return genericInclude.Invoke(query, [include.Navigation, include.JoinKind, include.Alias])
+        ?? throw new InvalidOperationException("Failed to apply include.");
+    }
+    catch (TargetInvocationException ex) when (ex.InnerException != null)
+    {
+      ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+      throw;
+    }
   }
 }
 

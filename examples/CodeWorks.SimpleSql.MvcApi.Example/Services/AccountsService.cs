@@ -8,6 +8,7 @@ public interface IAccountsService
   Task<List<Account>> GetRichAccountsAsync();
   Task<List<PublicProfile>> GetPublicProfilesAsync();
   Task<List<AccountSummaryProjection>> GetAccountSummariesAsync();
+  Task<List<ClaimableEmployeeProjection>> GetClaimableEmployeesByEmailAsync(string email);
   Task<Guid> UpsertAccountAsync(UpsertAccountInput input);
 }
 
@@ -22,6 +23,9 @@ public sealed class AccountsService(IAccountsRepository repository) : IAccountsS
   public Task<List<PublicProfile>> GetPublicProfilesAsync() => _repository.GetPublicProfilesAsync();
 
   public Task<List<AccountSummaryProjection>> GetAccountSummariesAsync() => _repository.GetAccountSummariesAsync();
+
+  public Task<List<ClaimableEmployeeProjection>> GetClaimableEmployeesByEmailAsync(string email)
+    => _repository.GetClaimableEmployeesByEmailAsync(email);
 
   public async Task<Guid> UpsertAccountAsync(UpsertAccountInput input)
   {
