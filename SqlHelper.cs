@@ -269,36 +269,86 @@ public static class SqlFilterBuilder
     bool hasSearchVector,
     string searchVectorColumn,
     out string? rankSql,
-    ISqlDialect dialect
-  )
+    ISqlDialect dialect,
+    bool enableFuzzy = true,
+    bool enablePrefix = true,
+    bool looseTokenMatch = false
+)
   {
     rankSql = null;
-    parameters.Add("q", keyword);
 
+    // --- PostgreSQL full‑text search with weighting ---
     if (hasSearchVector && string.Equals(dialect.Name, "postgres", StringComparison.OrdinalIgnoreCase))
     {
-      var tsQuerySql = """
-        (
-          SELECT to_tsquery(
-            'simple',
-            string_agg(term || ':*', ' & ')
-          )
-          FROM unnest(regexp_split_to_array(@q, '\s+')) term
-        )
-      """;
+      parameters.Add("q", keyword);
 
-      rankSql = $"ts_rank({searchVectorColumn}, {tsQuerySql})";
+      var tsQuerySql = """
+            (
+              SELECT to_tsquery(
+                'simple',
+                string_agg(term || ':*', ' & ')
+              )
+              FROM unnest(regexp_split_to_array(@q, '\s+')) term
+            )
+        """;
+
+      // Weighted rank (A highest, D lowest)
+      rankSql = $"ts_rank({searchVectorColumn}, {tsQuerySql}, 1)";
+
       return $"{searchVectorColumn} @@ {tsQuerySql}";
     }
 
-    parameters.Add("q_like", $"%{keyword}%");
+    // --- Multi‑term LIKE search ---
+    var tokens = keyword
+        .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(t => t.ToLower())
+        .ToArray();
 
-    var clauses = searchableFields.Select(f =>
-      $"LOWER({dialect.CastToText(dialect.Quote(f))}) LIKE LOWER(@q_like)"
-    );
+    var tokenClauses = new List<string>();
 
-    return "(" + string.Join(" OR ", clauses) + ")";
+    for (int i = 0; i < tokens.Length; i++)
+    {
+      var token = tokens[i];
+      var paramLike = $"q_like_{i}";
+      var paramPrefix = $"q_prefix_{i}";
+      var paramFuzzy = $"q_fuzzy_{i}";
+
+      parameters.Add(paramLike, $"%{token}%");
+      parameters.Add(paramPrefix, $"{token}%");
+      parameters.Add(paramFuzzy, token);
+
+      var fieldMatches = new List<string>();
+
+      foreach (var f in searchableFields)
+      {
+        var col = $"LOWER({dialect.CastToText(dialect.Quote(f))})";
+
+        // Contains
+        fieldMatches.Add($"{col} LIKE LOWER(@{paramLike})");
+
+        // Prefix
+        if (enablePrefix)
+          fieldMatches.Add($"{col} LIKE LOWER(@{paramPrefix})");
+
+        // Fuzzy (Postgres only)
+        if (enableFuzzy && dialect.Name.Equals("postgres", StringComparison.OrdinalIgnoreCase))
+          fieldMatches.Add($"levenshtein({col}, @{paramFuzzy}) <= 2");
+      }
+
+      // OR across fields
+      var orGroup = "(" + string.Join(" OR ", fieldMatches) + ")";
+
+      tokenClauses.Add(orGroup);
+    }
+
+    // AND across tokens (default) or OR (loose mode)
+    return looseTokenMatch
+        ? "(" + string.Join(" OR ", tokenClauses) + ")"
+        : "(" + string.Join(" AND ", tokenClauses) + ")";
   }
+
+
+
 
   public static string ToSnakeCase(string input)
   {
