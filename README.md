@@ -366,7 +366,7 @@ NuGet publish is automated via [.github/workflows/publish-nuget.yml](https://git
 
 Run task: `release: bump and publish next`
 
-- Bumps patch version in `CodeWorks.SimpleSql.csproj` (for example `0.1.0` → `0.1.1`)
+- Bumps patch version in `CodeWorks.SimpleSql.csproj` (for example `0.1.4` → `0.1.5`) 
 - Runs test suite
 - Commits the version bump and creates git tag `vX.Y.Z`
 - Pushes commit + tag to `origin` (which triggers NuGet publish workflow)
