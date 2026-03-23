@@ -1,4 +1,5 @@
 using System.Data;
+using System.Reflection;
 using CodeWorks.SimpleSql;
 using Xunit;
 
@@ -26,6 +27,68 @@ namespace CodeWorks.SimpleSql.Tests
       var dialect = SqlDialects.Detect(new UnknownConnection());
       Assert.Equal("postgres", dialect.Name);
     }
+
+    [Fact]
+    public void BuildSqlType_Postgres_UsesVectorTypeWithDimensions()
+    {
+      var prop = typeof(VectorEntity).GetProperty(nameof(VectorEntity.Embedding), BindingFlags.Public | BindingFlags.Instance)!;
+
+      var sqlType = SqlDialects.Postgres.BuildSqlType(prop.PropertyType, prop);
+
+      Assert.Equal("VECTOR(1536)", sqlType);
+    }
+
+    [Fact]
+    public void BuildSqlType_SqlServer_FallsBackToNVarCharForVector()
+    {
+      var prop = typeof(VectorEntity).GetProperty(nameof(VectorEntity.Embedding), BindingFlags.Public | BindingFlags.Instance)!;
+
+      var sqlType = SqlDialects.SqlServer.BuildSqlType(prop.PropertyType, prop);
+
+      Assert.Equal("NVARCHAR(MAX)", sqlType);
+    }
+
+    [Fact]
+    public void BuildSqlType_UsesExplicitVectorSqlType_WhenConfigured()
+    {
+      var prop = typeof(CustomVectorEntity).GetProperty(nameof(CustomVectorEntity.Embedding), BindingFlags.Public | BindingFlags.Instance)!;
+
+      var postgresSqlType = SqlDialects.Postgres.BuildSqlType(prop.PropertyType, prop);
+      var sqlServerSqlType = SqlDialects.SqlServer.BuildSqlType(prop.PropertyType, prop);
+
+      Assert.Equal("HALFVEC(768)", postgresSqlType);
+      Assert.Equal("HALFVEC(768)", sqlServerSqlType);
+    }
+
+    [Fact]
+    public void BuildSqlType_Postgres_UsesTsVector_ForDbSearchVector()
+    {
+      var prop = typeof(SearchVectorEntity).GetProperty(nameof(SearchVectorEntity.SearchVector), BindingFlags.Public | BindingFlags.Instance)!;
+
+      var sqlType = SqlDialects.Postgres.BuildSqlType(prop.PropertyType, prop);
+
+      Assert.Equal("TSVECTOR", sqlType);
+    }
+  }
+
+  public sealed class VectorEntity
+  {
+    [DbVector(1536)]
+    public float[] Embedding { get; set; } = [];
+  }
+
+  public sealed class CustomVectorEntity
+  {
+    [DbVector(SqlType = "HALFVEC(768)")]
+    public float[] Embedding { get; set; } = [];
+  }
+
+  public sealed class SearchVectorEntity
+  {
+    [DbSearchVector(nameof(Name))]
+    public string SearchVector { get; set; } = string.Empty;
+
+    public string Name { get; set; } = string.Empty;
   }
 
   internal sealed class UnknownConnection : IDbConnection

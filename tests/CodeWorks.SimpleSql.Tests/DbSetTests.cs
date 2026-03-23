@@ -97,6 +97,60 @@ public class DbSetTests
   }
 
   [Fact]
+  public void ToCompiledQuery_Search_ForPostgres_UsesSearchVectorAndRankOrdering()
+  {
+    var dbSet = new DbSet<PersonSearchEntity>(new FakeConnection(), SqlDialects.Postgres)
+      .Search("john doe");
+
+    var compiled = dbSet.ToCompiledQuery();
+
+    Assert.Contains("t0.\"person_search_vector\" @@", compiled.Sql);
+    Assert.Contains("ORDER BY ts_rank(t0.\"person_search_vector\"", compiled.Sql);
+    Assert.Equal("john doe", compiled.Parameters.Get<string>("q"));
+  }
+
+  [Fact]
+  public void ToCompiledQuery_Search_ForPostgresPhraseMode_UsesPhraseTsQuery()
+  {
+    var dbSet = new DbSet<PersonSearchEntity>(new FakeConnection(), SqlDialects.Postgres)
+      .Search("john doe", new SqlSearchOptions { Mode = SqlSearchMode.Phrase });
+
+    var compiled = dbSet.ToCompiledQuery();
+
+    Assert.Contains("phraseto_tsquery('simple', @q)", compiled.Sql);
+    Assert.Contains("ORDER BY ts_rank(t0.\"person_search_vector\"", compiled.Sql);
+  }
+
+  [Fact]
+  public void ToCompiledQuery_Search_ForSqlServer_UsesSourceFieldFallback()
+  {
+    var dbSet = new DbSet<PersonSearchEntity>(new FakeConnection(), SqlDialects.SqlServer)
+      .Search("john doe");
+
+    var compiled = dbSet.ToCompiledQuery();
+
+    Assert.Contains("t0.[first_name]", compiled.Sql);
+    Assert.Contains("t0.[last_name]", compiled.Sql);
+    Assert.DoesNotContain("person_search_vector @@", compiled.Sql);
+  }
+
+  [Fact]
+  public void ToCompiledQuery_Search_ComposesWithWhereAndProjection()
+  {
+    var query = new DbSet<PersonSearchEntity>(new FakeConnection(), SqlDialects.Postgres)
+      .Search("john doe")
+      .Where(x => x.FirstName == "John")
+      .Select<PersonSearchProjection>();
+
+    var compiled = query.ToCompiledQuery();
+
+    Assert.Contains("t0.\"person_search_vector\" @@", compiled.Sql);
+    Assert.Contains("WHERE (t0.\"first_name\" = @p0) AND", compiled.Sql);
+    Assert.Contains("ORDER BY ts_rank(t0.\"person_search_vector\"", compiled.Sql);
+    Assert.Contains("SELECT t0.\"id\" AS \"Id\", t0.\"first_name\" AS \"FirstName\", t0.\"last_name\" AS \"LastName\"", compiled.Sql);
+  }
+
+  [Fact]
   public void ToUpsertCompiledQuery_ForPostgres_BuildsOnConflictUpdate()
   {
     var dbSet = new DbSet<RepoOrder>(new FakeConnection(), SqlDialects.Postgres);
@@ -151,6 +205,22 @@ public class DbSetTests
     Assert.Equal(id, compiled.Parameters.Get<Guid>("Id"));
     Assert.Equal(customerId, compiled.Parameters.Get<Guid>("CustomerId"));
     Assert.Equal("active", compiled.Parameters.Get<string>("Status"));
+  }
+
+  [Fact]
+  public void ToUpsertCompiledQuery_ForPostgresVector_CastsAndSerializesEmbedding()
+  {
+    var dbSet = new DbSet<VectorDocument>(new FakeConnection(), SqlDialects.Postgres);
+    var row = new VectorDocument
+    {
+      Id = Guid.NewGuid(),
+      Embedding = [0.1f, 0.2f, 0.3f]
+    };
+
+    var compiled = dbSet.ToUpsertCompiledQuery(row, x => x.Id);
+
+    Assert.Contains("@Embedding::VECTOR", compiled.Sql);
+    Assert.Equal("[0.1,0.2,0.3]", compiled.Parameters.Get<string>("Embedding"));
   }
 
   [Fact]
@@ -357,6 +427,17 @@ public sealed class OrderWithCustomerProfile
   public string CustomerName { get; set; } = string.Empty;
 }
 
+public sealed class PersonSearchProjection
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("first_name")]
+  public string FirstName { get; set; } = string.Empty;
+
+  [DbColumn("last_name")]
+  public string LastName { get; set; } = string.Empty;
+}
+
 [DbTable("collision_orders")]
 public sealed class CollisionOrder
 {
@@ -533,6 +614,15 @@ public sealed class RepoCustomer
 {
   public Guid Id { get; set; }
   public string Name { get; set; } = string.Empty;
+}
+
+[DbTable("vector_documents")]
+public sealed class VectorDocument
+{
+  public Guid Id { get; set; }
+
+  [DbVector(3)]
+  public float[] Embedding { get; set; } = [];
 }
 
 internal sealed class FakeConnection : IDbConnection

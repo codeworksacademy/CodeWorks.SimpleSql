@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
@@ -38,6 +39,10 @@ public sealed class SqlPropertyMap
   public bool Writable { get; }
   public bool Selectable { get; }
   public bool IsJson { get; }
+  public bool IsVector { get; }
+  public DbVectorAttribute? Vector { get; }
+  public bool IsSearchVector { get; }
+  public DbSearchVectorAttribute? SearchVector { get; }
 
   public SqlPropertyMap(PropertyInfo prop)
   {
@@ -58,6 +63,18 @@ public sealed class SqlPropertyMap
 
     IsJson =
       prop.GetCustomAttribute<JsonColumnAttribute>() != null;
+
+    Vector = prop.GetCustomAttribute<DbVectorAttribute>();
+    IsVector = Vector != null;
+
+    SearchVector = prop.GetCustomAttribute<DbSearchVectorAttribute>();
+    IsSearchVector = SearchVector != null;
+
+    if (SearchVector != null)
+    {
+      Writable = Writable && SearchVector.Writable;
+      Selectable = Selectable && SearchVector.Selectable;
+    }
   }
 }
 
@@ -92,13 +109,19 @@ public sealed class EntityToSql
 
   public string InsertValues =>
     string.Join(", ", Map.Writable.Select(p =>
-      p.IsJson ? Dialect.ParameterJsonCast($"@{p.Property.Name}") : $"@{p.Property.Name}"
+      p.IsJson
+        ? Dialect.ParameterJsonCast($"@{p.Property.Name}")
+        : p.IsVector && p.Vector != null
+          ? Dialect.ParameterVectorCast($"@{p.Property.Name}", p.Vector)
+          : $"@{p.Property.Name}"
     ));
 
   public string UpdateSet =>
     string.Join(", ", Map.Writable.Select(p =>
       p.IsJson
         ? $"{Dialect.Quote(p.Column)} = {Dialect.ParameterJsonCast($"@{p.Property.Name}")}"
+        : p.IsVector && p.Vector != null
+          ? $"{Dialect.Quote(p.Column)} = {Dialect.ParameterVectorCast($"@{p.Property.Name}", p.Vector)}"
         : $"{Dialect.Quote(p.Column)} = @{p.Property.Name}"
     ));
 
@@ -173,10 +196,14 @@ public static class SqlFilterBuilder
     SqlEntityMap? entity = null,
     bool hasSearchVector = false,
     string searchVectorColumn = "search_vector",
-    ISqlDialect? dialect = null
+    string searchVectorConfig = "simple",
+    ISqlDialect? dialect = null,
+    string? alias = null,
+    SqlSearchOptions? searchOptions = null
   )
   {
     var activeDialect = dialect ?? SqlHelper.Dialect;
+    var activeSearchOptions = searchOptions ?? SqlSearchOptions.Default;
     var clauses = new List<string>();
     string? rankSql = null;
 
@@ -184,13 +211,13 @@ public static class SqlFilterBuilder
     {
       var whereSql = BuildKeyword(
         keyword, searchableFields, parameters,
-        hasSearchVector, searchVectorColumn, out rankSql, activeDialect
+        hasSearchVector, searchVectorColumn, searchVectorConfig, out rankSql, activeDialect, alias, activeSearchOptions
       );
       clauses.Add(whereSql);
     }
 
     if (filters != null && entity != null)
-      clauses.Add(BuildFilters(filters, parameters, entity, activeDialect));
+      clauses.Add(BuildFilters(filters, parameters, entity, activeDialect, alias));
 
     var valid = clauses.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
 
@@ -204,10 +231,11 @@ public static class SqlFilterBuilder
     Dictionary<string, string> filters,
     DynamicParameters parameters,
     SqlEntityMap entity,
-    ISqlDialect dialect
+    ISqlDialect dialect,
+    string? alias
 )
   {
-    var ctx = new SqlPredicateContext(entity, parameters, null, dialect);
+    var ctx = new SqlPredicateContext(entity, parameters, alias, dialect);
     var clauses = new List<string>();
 
     foreach (var (key, raw) in filters)
@@ -262,40 +290,66 @@ public static class SqlFilterBuilder
     return Convert.ChangeType(raw, targetType);
   }
 
+  private static string QualifyColumn(
+    string column,
+    ISqlDialect dialect,
+    string? alias,
+    bool quoteIdentifier)
+  {
+    var identifier = quoteIdentifier ? dialect.Quote(column) : column;
+    return string.IsNullOrWhiteSpace(alias) ? identifier : $"{alias}.{identifier}";
+  }
+
   private static string BuildKeyword(
     string keyword,
     string[] searchableFields,
     DynamicParameters parameters,
     bool hasSearchVector,
     string searchVectorColumn,
+    string searchVectorConfig,
     out string? rankSql,
     ISqlDialect dialect,
-    bool enableFuzzy = true,
-    bool enablePrefix = true,
-    bool looseTokenMatch = false
+    string? alias = null,
+    SqlSearchOptions? searchOptions = null
 )
   {
+    var options = searchOptions ?? SqlSearchOptions.Default;
     rankSql = null;
 
     // --- PostgreSQL full‑text search with weighting ---
     if (hasSearchVector && string.Equals(dialect.Name, "postgres", StringComparison.OrdinalIgnoreCase))
     {
       parameters.Add("q", keyword);
+      var escapedConfig = (searchVectorConfig ?? "simple").Replace("'", "''");
+      var vectorColumn = QualifyColumn(searchVectorColumn, dialect, alias, quoteIdentifier: true);
 
-      var tsQuerySql = """
-            (
-              SELECT to_tsquery(
-                'simple',
-                string_agg(term || ':*', ' & ')
-              )
-              FROM unnest(regexp_split_to_array(@q, '\s+')) term
-            )
-        """;
+      var tsQuerySql = options.Mode switch
+      {
+        SqlSearchMode.Plain => $"plainto_tsquery('{escapedConfig}', @q)",
+        SqlSearchMode.Phrase => $"phraseto_tsquery('{escapedConfig}', @q)",
+        _ => BuildPrefixTsQuerySql(escapedConfig, options.LooseTokenMatch)
+      };
 
       // Weighted rank (A highest, D lowest)
-      rankSql = $"ts_rank({searchVectorColumn}, {tsQuerySql}, 1)";
+      rankSql = $"ts_rank({vectorColumn}, {tsQuerySql}, 1)";
 
-      return $"{searchVectorColumn} @@ {tsQuerySql}";
+      return $"{vectorColumn} @@ {tsQuerySql}";
+    }
+
+    if (options.Mode == SqlSearchMode.Phrase)
+    {
+      var paramLike = "q_phrase_like";
+      parameters.Add(paramLike, $"%{keyword.ToLower()}%");
+
+      var fieldMatches = searchableFields
+        .Select(f =>
+        {
+          var col = $"LOWER({dialect.CastToText(QualifyColumn(f, dialect, alias, quoteIdentifier: true))})";
+          return $"{col} LIKE LOWER(@{paramLike})";
+        })
+        .ToList();
+
+      return "(" + string.Join(" OR ", fieldMatches) + ")";
     }
 
     // --- Multi‑term LIKE search ---
@@ -321,17 +375,17 @@ public static class SqlFilterBuilder
 
       foreach (var f in searchableFields)
       {
-        var col = $"LOWER({dialect.CastToText(dialect.Quote(f))})";
+        var col = $"LOWER({dialect.CastToText(QualifyColumn(f, dialect, alias, quoteIdentifier: true))})";
 
         // Contains
         fieldMatches.Add($"{col} LIKE LOWER(@{paramLike})");
 
         // Prefix
-        if (enablePrefix)
+        if (options.EnablePrefix)
           fieldMatches.Add($"{col} LIKE LOWER(@{paramPrefix})");
 
         // Fuzzy (Postgres only)
-        if (enableFuzzy && dialect.Name.Equals("postgres", StringComparison.OrdinalIgnoreCase))
+        if (options.EnableFuzzy && dialect.Name.Equals("postgres", StringComparison.OrdinalIgnoreCase))
           fieldMatches.Add($"levenshtein({col}, @{paramFuzzy}) <= 2");
       }
 
@@ -342,9 +396,23 @@ public static class SqlFilterBuilder
     }
 
     // AND across tokens (default) or OR (loose mode)
-    return looseTokenMatch
+    return options.LooseTokenMatch
         ? "(" + string.Join(" OR ", tokenClauses) + ")"
         : "(" + string.Join(" AND ", tokenClauses) + ")";
+  }
+
+  private static string BuildPrefixTsQuerySql(string escapedConfig, bool looseTokenMatch)
+  {
+    var joinOperator = looseTokenMatch ? " | " : " & ";
+    return $@"""
+            (
+              SELECT to_tsquery(
+                '{escapedConfig}',
+                string_agg(term || ':*', '{joinOperator}')
+              )
+              FROM unnest(regexp_split_to_array(@q, '\s+')) term
+            )
+        """;
   }
 
 
@@ -639,6 +707,23 @@ public sealed class SqlQuery<T>
 
 #region Public API
 
+public enum SqlSearchMode
+{
+  Prefix,
+  Plain,
+  Phrase
+}
+
+public sealed class SqlSearchOptions
+{
+  public static SqlSearchOptions Default { get; } = new();
+
+  public SqlSearchMode Mode { get; init; } = SqlSearchMode.Prefix;
+  public bool EnablePrefix { get; init; } = true;
+  public bool EnableFuzzy { get; init; } = true;
+  public bool LooseTokenMatch { get; init; }
+}
+
 public static class SqlHelper
 {
   public static ISqlDialect Dialect { get; private set; } = SqlDialects.Postgres;
@@ -666,7 +751,10 @@ public static class SqlHelper
       DynamicParameters parameters,
       bool hasSearchVector = false,
       string searchVectorColumn = "search_vector",
-      ISqlDialect? dialect = null)
+      string searchVectorConfig = "simple",
+      ISqlDialect? dialect = null,
+      string? alias = null,
+      SqlSearchOptions? searchOptions = null)
   {
     return SqlFilterBuilder.Build(
         searchableFields,
@@ -676,8 +764,116 @@ public static class SqlHelper
         SQLMapper.Get<T>(),
         hasSearchVector,
         searchVectorColumn,
-        dialect ?? Dialect
+        searchVectorConfig,
+        dialect ?? Dialect,
+        alias,
+        searchOptions
     );
+  }
+
+  public static (string whereSql, string? rankSql) BuildFilter<T>(
+      string? keyword,
+      Dictionary<string, string>? filters,
+      DynamicParameters parameters,
+      ISqlDialect? dialect = null,
+        string? alias = null,
+        SqlSearchOptions? searchOptions = null)
+  {
+    var activeDialect = dialect ?? Dialect;
+    var map = SQLMapper.Get<T>();
+
+    var searchVectorProp = map.Properties.FirstOrDefault(p => p.IsSearchVector);
+    var hasSearchVector =
+      searchVectorProp != null &&
+      string.Equals(activeDialect.Name, "postgres", StringComparison.OrdinalIgnoreCase);
+
+    var searchVectorColumn = searchVectorProp?.Column ?? "search_vector";
+    var searchVectorConfig = searchVectorProp?.SearchVector?.Configuration ?? "simple";
+    var searchableFields = ResolveSearchableFields(map, searchVectorProp);
+
+    return SqlFilterBuilder.Build(
+      searchableFields,
+      keyword,
+      filters,
+      parameters,
+      map,
+      hasSearchVector,
+      searchVectorColumn,
+      searchVectorConfig,
+      activeDialect,
+      alias,
+      searchOptions
+    );
+  }
+
+  public static (string whereSql, string? rankSql) BuildFilter(
+      Type entityType,
+      string? keyword,
+      IReadOnlyDictionary<string, string>? filters,
+      DynamicParameters parameters,
+      ISqlDialect? dialect = null,
+        string? alias = null,
+        SqlSearchOptions? searchOptions = null)
+  {
+    ArgumentNullException.ThrowIfNull(entityType);
+
+    var activeDialect = dialect ?? Dialect;
+    var map = SQLMapper.Get(entityType);
+
+    var searchVectorProp = map.Properties.FirstOrDefault(p => p.IsSearchVector);
+    var hasSearchVector =
+      searchVectorProp != null &&
+      string.Equals(activeDialect.Name, "postgres", StringComparison.OrdinalIgnoreCase);
+
+    var searchVectorColumn = searchVectorProp?.Column ?? "search_vector";
+    var searchVectorConfig = searchVectorProp?.SearchVector?.Configuration ?? "simple";
+    var searchableFields = ResolveSearchableFields(map, searchVectorProp);
+    var filterDictionary = filters == null
+      ? null
+      : new Dictionary<string, string>(filters, StringComparer.OrdinalIgnoreCase);
+
+    return SqlFilterBuilder.Build(
+      searchableFields,
+      keyword,
+      filterDictionary,
+      parameters,
+      map,
+      hasSearchVector,
+      searchVectorColumn,
+      searchVectorConfig,
+      activeDialect,
+      alias,
+      searchOptions
+    );
+  }
+
+
+  private static string[] ResolveSearchableFields(SqlEntityMap map, SqlPropertyMap? searchVectorProp)
+  {
+    if (searchVectorProp?.SearchVector?.SourceProperties is { Length: > 0 } sourceProps)
+    {
+      var columns = sourceProps
+        .Select(source => map.Properties
+          .FirstOrDefault(p => p.Property.Name.Equals(source, StringComparison.OrdinalIgnoreCase))
+          ?.Column)
+        .Where(column => !string.IsNullOrWhiteSpace(column))
+        .Cast<string>()
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+      if (columns.Length > 0)
+        return columns;
+    }
+
+    var fallback = map.Selectable
+      .Where(p => p.Property.PropertyType == typeof(string) && !p.IsSearchVector)
+      .Select(p => p.Column)
+      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+
+    return fallback.Length > 0
+      ? fallback
+      : map.Selectable.Select(p => p.Column).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
   }
 
   public static string BuildWhere<T>(
@@ -788,6 +984,8 @@ public static class SqlHelper
 
       if (prop.IsJson)
         parameters.Add(paramName, JsonSerializer.Serialize(value));
+      else if (prop.IsVector)
+        parameters.Add(paramName, SqlVectorValueFormatter.Format(value));
       else
         parameters.Add(paramName, value);
     }
@@ -806,6 +1004,78 @@ public static class SqlHelper
   }
 }
 
+internal static class SqlVectorValueFormatter
+{
+  public static object? Format(object? value)
+  {
+    if (value == null)
+      return null;
+
+    if (value is string)
+      return value;
+
+    if (value is not IEnumerable enumerable)
+      return value;
+
+    var values = new List<string>();
+    foreach (var item in enumerable)
+    {
+      if (!TryFormatNumber(item, out var number))
+        return value;
+
+      values.Add(number);
+    }
+
+    return $"[{string.Join(",", values)}]";
+  }
+
+  private static bool TryFormatNumber(object? value, out string number)
+  {
+    switch (value)
+    {
+      case null:
+        number = string.Empty;
+        return false;
+      case byte v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case sbyte v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case short v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case ushort v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case int v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case uint v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case long v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case ulong v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case float v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case double v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      case decimal v:
+        number = v.ToString(CultureInfo.InvariantCulture);
+        return true;
+      default:
+        number = string.Empty;
+        return false;
+    }
+  }
+}
+
 #endregion
 
 #region Attributes
@@ -818,6 +1088,41 @@ public sealed class IgnoreSelectAttribute : Attribute { }
 
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class JsonColumnAttribute : Attribute { }
+
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class DbVectorAttribute : Attribute
+{
+  public int? Dimensions { get; }
+  public string? SqlType { get; init; }
+
+  public DbVectorAttribute(int dimensions)
+  {
+    if (dimensions <= 0)
+      throw new ArgumentOutOfRangeException(nameof(dimensions), "Vector dimensions must be greater than zero.");
+
+    Dimensions = dimensions;
+  }
+
+  public DbVectorAttribute()
+  {
+  }
+}
+
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class DbSearchVectorAttribute : Attribute
+{
+  public string[] SourceProperties { get; }
+  public string[] SourceWeights { get; init; } = [];
+  public string Configuration { get; init; } = "simple";
+  public bool Writable { get; init; } = false;
+  public bool Selectable { get; init; } = false;
+  public bool CreateIndex { get; init; } = true;
+
+  public DbSearchVectorAttribute(params string[] sourceProperties)
+  {
+    SourceProperties = sourceProperties ?? [];
+  }
+}
 
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class ProjectionSourceAttribute : Attribute

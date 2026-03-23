@@ -185,11 +185,14 @@ internal sealed class ColumnSyncStep : ISchemaSyncStep
       if (existing.Contains(column))
         continue;
 
-      var sqlType = dialect.BuildSqlType(prop.PropertyType, prop);
+      var addColumnSql = SearchVectorSchemaSqlBuilder.BuildAddColumnSql(
+        type,
+        prop,
+        schema,
+        tableName,
+        dialect);
 
-      await db.ExecuteAsync(
-        dialect.BuildAddColumnSql(schema, tableName, column, sqlType),
-        transaction: tx);
+      await db.ExecuteAsync(addColumnSql, transaction: tx);
 
       SchemaSyncLogger.Log($"[New Column Added]: {tableName}.{column}");
     }
@@ -224,6 +227,178 @@ internal sealed class IndexSyncStep : ISchemaSyncStep
       await db.ExecuteAsync(sql, transaction: tx);
       SchemaSyncLogger.Log($"[New Index Added]: {table}.{indexName}");
     }
+
+    foreach (var prop in model.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+    {
+      var searchVector = prop.GetCustomAttribute<DbSearchVectorAttribute>();
+      if (searchVector == null || !searchVector.CreateIndex)
+        continue;
+
+      var column = prop.GetCustomAttribute<DbColumnAttribute>()?.ColumnName
+        ?? SqlHelper.ToSnakeCase(prop.Name)!;
+
+      var indexName = dialect.BuildIndexName(table, [column]);
+      var exists = await db.ExecuteScalarAsync<bool>(
+        dialect.BuildIndexExistsSql(),
+        new { schema, table, index = indexName },
+        tx
+      );
+
+      if (exists)
+        continue;
+
+      var sql = SearchVectorSchemaSqlBuilder.BuildIndexSql(
+        model,
+        prop,
+        schema,
+        table,
+        dialect,
+        indexName);
+
+      if (string.IsNullOrWhiteSpace(sql))
+        continue;
+
+      await db.ExecuteAsync(sql, transaction: tx);
+      SchemaSyncLogger.Log($"[New Search Index Added]: {table}.{indexName}");
+    }
+  }
+}
+
+internal static class SearchVectorSchemaSqlBuilder
+{
+  private readonly record struct SearchVectorSourceSpec(string Column, string? Weight);
+
+  public static string BuildAddColumnSql(
+    Type modelType,
+    PropertyInfo prop,
+    string schema,
+    string tableName,
+    ISqlDialect dialect)
+  {
+    var column = prop.GetCustomAttribute<DbColumnAttribute>()?.ColumnName
+      ?? SqlHelper.ToSnakeCase(prop.Name)
+      ?? prop.Name;
+
+    var searchVector = prop.GetCustomAttribute<DbSearchVectorAttribute>();
+    if (searchVector == null || !string.Equals(dialect.Name, "postgres", StringComparison.OrdinalIgnoreCase))
+    {
+      var sqlType = dialect.BuildSqlType(prop.PropertyType, prop);
+      return dialect.BuildAddColumnSql(schema, tableName, column, sqlType);
+    }
+
+    var expression = BuildPostgresExpression(modelType, prop, searchVector, dialect);
+    var full = dialect.BuildTableName(schema, tableName);
+    return $"ALTER TABLE {full} ADD COLUMN {dialect.Quote(column)} TSVECTOR GENERATED ALWAYS AS ({expression}) STORED;";
+  }
+
+  public static string? BuildIndexSql(
+    Type modelType,
+    PropertyInfo prop,
+    string schema,
+    string tableName,
+    ISqlDialect dialect,
+    string indexName)
+  {
+    _ = modelType;
+
+    var searchVector = prop.GetCustomAttribute<DbSearchVectorAttribute>();
+    if (searchVector == null || !searchVector.CreateIndex)
+      return null;
+
+    if (!string.Equals(dialect.Name, "postgres", StringComparison.OrdinalIgnoreCase))
+      return null;
+
+    var column = prop.GetCustomAttribute<DbColumnAttribute>()?.ColumnName
+      ?? SqlHelper.ToSnakeCase(prop.Name)
+      ?? prop.Name;
+
+    var full = dialect.BuildTableName(schema, tableName);
+    return $"CREATE INDEX IF NOT EXISTS {dialect.Quote(indexName)} ON {full} USING GIN ({dialect.Quote(column)});";
+  }
+
+  private static string BuildPostgresExpression(
+    Type modelType,
+    PropertyInfo prop,
+    DbSearchVectorAttribute searchVector,
+    ISqlDialect dialect)
+  {
+    var configuration = (searchVector.Configuration ?? "simple").Replace("'", "''");
+
+    var vectorExpressions = ResolveSourceColumns(modelType, prop, searchVector)
+      .Select(source => BuildSourceVectorExpression(source, configuration, dialect))
+      .ToArray();
+
+    if (vectorExpressions.Length == 0)
+      return $"to_tsvector('{configuration}', '')";
+
+    return string.Join(" || ", vectorExpressions);
+  }
+
+  private static string BuildSourceVectorExpression(
+    SearchVectorSourceSpec source,
+    string configuration,
+    ISqlDialect dialect)
+  {
+    var textExpression = $"COALESCE(CAST({dialect.Quote(source.Column)} AS TEXT), '')";
+    var vectorExpression = $"to_tsvector('{configuration}', {textExpression})";
+
+    return string.IsNullOrWhiteSpace(source.Weight)
+      ? vectorExpression
+      : $"setweight({vectorExpression}, '{source.Weight}')";
+  }
+
+  private static IReadOnlyList<SearchVectorSourceSpec> ResolveSourceColumns(
+    Type modelType,
+    PropertyInfo prop,
+    DbSearchVectorAttribute searchVector)
+  {
+    var sourceNames = searchVector.SourceProperties;
+    var sourceWeights = searchVector.SourceWeights;
+
+    if (sourceNames.Length == 0)
+    {
+      return modelType
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(candidate =>
+          candidate.Name != prop.Name &&
+          candidate.PropertyType == typeof(string) &&
+          candidate.GetCustomAttribute<DbSearchVectorAttribute>() == null)
+        .Select((candidate, index) =>
+        {
+          var column = candidate.GetCustomAttribute<DbColumnAttribute>()?.ColumnName ?? SqlHelper.ToSnakeCase(candidate.Name) ?? candidate.Name;
+          var weight = ResolveWeight(sourceWeights, index, modelType, prop.Name);
+          return new SearchVectorSourceSpec(column, weight);
+        })
+        .ToArray();
+    }
+
+    return sourceNames
+      .Select((sourceName, index) =>
+      {
+        var sourceProp = modelType.GetProperty(sourceName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase)
+          ?? throw new InvalidOperationException($"Could not resolve DbSearchVector source property '{sourceName}' on {modelType.Name}.");
+
+        var column = sourceProp.GetCustomAttribute<DbColumnAttribute>()?.ColumnName ?? SqlHelper.ToSnakeCase(sourceProp.Name) ?? sourceProp.Name;
+        var weight = ResolveWeight(sourceWeights, index, modelType, prop.Name);
+        return new SearchVectorSourceSpec(column, weight);
+      })
+      .ToArray();
+  }
+
+  private static string? ResolveWeight(
+    IReadOnlyList<string> weights,
+    int index,
+    Type modelType,
+    string propertyName)
+  {
+    if (weights.Count <= index || string.IsNullOrWhiteSpace(weights[index]))
+      return null;
+
+    var weight = weights[index].Trim().ToUpperInvariant();
+    if (weight is not ("A" or "B" or "C" or "D"))
+      throw new InvalidOperationException($"Invalid DbSearchVector source weight '{weights[index]}' on {modelType.Name}.{propertyName}. Use A, B, C, or D.");
+
+    return weight;
   }
 }
 

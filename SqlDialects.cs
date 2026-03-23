@@ -9,6 +9,7 @@ public interface ISqlDialect
   string Name { get; }
   string Quote(string identifier);
   string ParameterJsonCast(string parameterName);
+  string ParameterVectorCast(string parameterName, DbVectorAttribute vector);
   string CastToText(string expressionSql);
   string CurrentSchemaSql { get; }
   string SetSchemaSql(string schema);
@@ -51,6 +52,13 @@ internal sealed class PostgresDialect : ISqlDialect
   public string Quote(string identifier) => $"\"{identifier}\"";
 
   public string ParameterJsonCast(string parameterName) => $"{parameterName}::jsonb";
+
+  public string ParameterVectorCast(string parameterName, DbVectorAttribute vector)
+  {
+    var sqlType = ResolveVectorSqlType(vector);
+    var castTarget = sqlType.Split('(', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)[0];
+    return $"{parameterName}::{castTarget}";
+  }
 
   public string CastToText(string expressionSql) => $"CAST({expressionSql} AS TEXT)";
 
@@ -118,6 +126,13 @@ internal sealed class PostgresDialect : ISqlDialect
     if (prop.GetCustomAttribute<JsonColumnAttribute>() != null)
       return "JSONB";
 
+    if (prop.GetCustomAttribute<DbSearchVectorAttribute>() != null)
+      return "TSVECTOR";
+
+    var vector = prop.GetCustomAttribute<DbVectorAttribute>();
+    if (vector != null)
+      return ResolveVectorSqlType(vector);
+
     var type = Nullable.GetUnderlyingType(clrType) ?? clrType;
 
     if (type.IsEnum)
@@ -148,6 +163,16 @@ internal sealed class PostgresDialect : ISqlDialect
 
     return "TEXT";
   }
+
+  private static string ResolveVectorSqlType(DbVectorAttribute vector)
+  {
+    if (!string.IsNullOrWhiteSpace(vector.SqlType))
+      return vector.SqlType!;
+
+    return vector.Dimensions.HasValue
+      ? $"VECTOR({vector.Dimensions.Value})"
+      : "VECTOR";
+  }
 }
 
 internal sealed class SqlServerDialect : ISqlDialect
@@ -157,6 +182,8 @@ internal sealed class SqlServerDialect : ISqlDialect
   public string Quote(string identifier) => $"[{identifier}]";
 
   public string ParameterJsonCast(string parameterName) => parameterName;
+
+  public string ParameterVectorCast(string parameterName, DbVectorAttribute vector) => parameterName;
 
   public string CastToText(string expressionSql) => $"CAST({expressionSql} AS NVARCHAR(MAX))";
 
@@ -225,6 +252,15 @@ internal sealed class SqlServerDialect : ISqlDialect
   {
     if (prop.GetCustomAttribute<JsonColumnAttribute>() != null)
       return "NVARCHAR(MAX)";
+
+    if (prop.GetCustomAttribute<DbSearchVectorAttribute>() != null)
+      return "NVARCHAR(MAX)";
+
+    var vector = prop.GetCustomAttribute<DbVectorAttribute>();
+    if (vector != null)
+      return !string.IsNullOrWhiteSpace(vector.SqlType)
+        ? vector.SqlType!
+        : "NVARCHAR(MAX)";
 
     var type = Nullable.GetUnderlyingType(clrType) ?? clrType;
 

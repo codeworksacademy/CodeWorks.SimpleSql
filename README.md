@@ -190,6 +190,113 @@ await SchemaSync.SyncModelsAsync(
 
 `LogPath` is optional; when omitted, no file is written.
 
+## Vector columns
+
+Use `[DbVector(...)]` on numeric array properties to map embedding/vector columns through schema sync and upsert helpers.
+
+```csharp
+[DbTable("documents")]
+public sealed class Document
+{
+  public Guid Id { get; set; }
+
+  [DbVector(1536)]
+  public float[] Embedding { get; set; } = [];
+}
+```
+
+Notes:
+
+- PostgreSQL maps to `VECTOR(1536)` by default and writes values with `::VECTOR` cast.
+- SQL Server falls back to `NVARCHAR(MAX)` unless `SqlType` is explicitly provided.
+- You can override generated SQL type with `[DbVector(SqlType = "HALFVEC(768)")]`.
+
+## Full-text search vectors (tsvector)
+
+Use `[DbSearchVector(...)]` on a dedicated column property to model PostgreSQL `tsvector` search fields.
+
+```csharp
+[DbTable("people")]
+public sealed class Person
+{
+  public Guid Id { get; set; }
+
+  [DbColumn("first_name")]
+  public string FirstName { get; set; } = string.Empty;
+
+  [DbColumn("last_name")]
+  public string LastName { get; set; } = string.Empty;
+
+  [IgnoreWrite, IgnoreSelect]
+  public string Name => $"{FirstName} {LastName}";
+
+  [DbColumn("person_search_vector")]
+  [DbSearchVector(nameof(FirstName), nameof(LastName), Configuration = "simple")]
+  public string SearchVector { get; set; } = string.Empty;
+}
+```
+
+Then build filters without manually wiring `hasSearchVector`/`searchVectorColumn`:
+
+```csharp
+var parameters = new DynamicParameters();
+var (whereSql, rankSql) = SqlHelper.BuildFilter<Person>(
+  keyword: "john doe",
+  filters: null,
+  parameters: parameters,
+  dialect: SqlDialects.Postgres);
+```
+
+Or use the higher-level query API directly:
+
+```csharp
+var people = await session
+  .Set<Person>()
+  .Search("john doe")
+  .ToListAsync();
+```
+
+`DbSet<T>.Search(...)` automatically uses `[DbSearchVector]` metadata, applies rank ordering on PostgreSQL, and falls back to source-field matching on other dialects.
+
+Use search mode options when you want stricter behavior:
+
+```csharp
+var exactPhrase = await session
+  .Set<Person>()
+  .Search(
+    "john doe",
+    new SqlSearchOptions { Mode = SqlSearchMode.Phrase })
+  .ToListAsync();
+```
+
+Available modes:
+
+- `Prefix` (default): tokenized prefix search (good general-purpose search).
+- `Plain`: `plainto_tsquery` semantics.
+- `Phrase`: `phraseto_tsquery` semantics for tighter phrase matching.
+
+You can also weight source fields for rank scoring:
+
+```csharp
+[DbColumn("search_vector")]
+[DbSearchVector(
+  nameof(FirstName),
+  nameof(LastName),
+  SourceWeights = ["A", "B"],
+  Configuration = "simple")]
+public string SearchVector { get; set; } = string.Empty;
+```
+
+`SourceWeights` maps by source-property index and accepts `A`, `B`, `C`, `D` (`A` strongest).
+
+Notes:
+
+- PostgreSQL maps `[DbSearchVector]` columns to `TSVECTOR`.
+- `SchemaSync` creates PostgreSQL search-vector columns as `GENERATED ALWAYS AS (...) STORED` using the declared source fields.
+- `SchemaSync` also creates a GIN index for `[DbSearchVector]` columns by default.
+- Source properties control fallback LIKE search fields on non-PostgreSQL dialects.
+- `DbSearchVector` columns are non-writable and non-selectable by default.
+
 ## Operational notes
 
 - Connection pooling is provided by your database provider, not by this library.

@@ -17,6 +17,7 @@ public interface ISqlSession
 public interface IDbSet<T>
 {
   IDbSet<T> Where(Expression<Func<T, bool>> predicate);
+  IDbSet<T> Search(string keyword, SqlSearchOptions? options = null, Dictionary<string, string>? filters = null);
   IDbSet<T> Include<TJoin>(Expression<Func<T, object?>> navigation, SqlJoinType joinType = SqlJoinType.Left, string? alias = null);
   IDbSet<T> OrderBy(Expression<Func<T, object>> expression, bool desc = false);
   IDbSet<T> Page(int page, int size);
@@ -76,6 +77,9 @@ public sealed class DbSet<T> : IDbSet<T>
 
   public IDbSet<T> Where(Expression<Func<T, bool>> predicate)
     => new DbSet<T>(_db, _dialect, _model.AddWhere(predicate));
+
+  public IDbSet<T> Search(string keyword, SqlSearchOptions? options = null, Dictionary<string, string>? filters = null)
+    => new DbSet<T>(_db, _dialect, _model.SetSearch(keyword, options, filters));
 
   public IDbSet<T> Include<TJoin>(
     Expression<Func<T, object?>> navigation,
@@ -359,6 +363,9 @@ internal sealed class SqlQueryModel
 {
   public Type RootType { get; }
   public IReadOnlyList<LambdaExpression> Wheres { get; }
+  public string? SearchKeyword { get; }
+  public SqlSearchOptions? SearchOptions { get; }
+  public IReadOnlyDictionary<string, string>? SearchFilters { get; }
   public IReadOnlyList<IncludeSpec> Includes { get; }
   public IReadOnlyList<OrderSpec> Orders { get; }
   public int? Limit { get; }
@@ -367,6 +374,9 @@ internal sealed class SqlQueryModel
   private SqlQueryModel(
     Type rootType,
     IReadOnlyList<LambdaExpression>? wheres = null,
+    string? searchKeyword = null,
+    SqlSearchOptions? searchOptions = null,
+    IReadOnlyDictionary<string, string>? searchFilters = null,
     IReadOnlyList<IncludeSpec>? includes = null,
     IReadOnlyList<OrderSpec>? orders = null,
     int? limit = null,
@@ -374,6 +384,9 @@ internal sealed class SqlQueryModel
   {
     RootType = rootType;
     Wheres = wheres ?? [];
+    SearchKeyword = searchKeyword;
+    SearchOptions = searchOptions;
+    SearchFilters = searchFilters;
     Includes = includes ?? [];
     Orders = orders ?? [];
     Limit = limit;
@@ -386,27 +399,38 @@ internal sealed class SqlQueryModel
   {
     var next = Wheres.ToList();
     next.Add(expression);
-    return new SqlQueryModel(RootType, next, Includes, Orders, Limit, Offset);
+    return new SqlQueryModel(RootType, next, SearchKeyword, SearchOptions, SearchFilters, Includes, Orders, Limit, Offset);
+  }
+
+  public SqlQueryModel SetSearch(string keyword, SqlSearchOptions? options, Dictionary<string, string>? filters)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(keyword);
+
+    var nextFilters = filters == null
+      ? null
+      : new Dictionary<string, string>(filters, StringComparer.OrdinalIgnoreCase);
+
+    return new SqlQueryModel(RootType, Wheres, keyword, options, nextFilters, Includes, Orders, Limit, Offset);
   }
 
   public SqlQueryModel AddInclude(Type joinType, LambdaExpression navigation, SqlJoinType joinKind, string? alias)
   {
     var next = Includes.ToList();
     next.Add(new IncludeSpec(joinType, navigation, joinKind, alias));
-    return new SqlQueryModel(RootType, Wheres, next, Orders, Limit, Offset);
+    return new SqlQueryModel(RootType, Wheres, SearchKeyword, SearchOptions, SearchFilters, next, Orders, Limit, Offset);
   }
 
   public SqlQueryModel AddOrder(LambdaExpression expression, bool desc)
   {
     var next = Orders.ToList();
     next.Add(new OrderSpec(expression, desc));
-    return new SqlQueryModel(RootType, Wheres, Includes, next, Limit, Offset);
+    return new SqlQueryModel(RootType, Wheres, SearchKeyword, SearchOptions, SearchFilters, Includes, next, Limit, Offset);
   }
 
   public SqlQueryModel SetPaging(int page, int size)
   {
     var offset = (page - 1) * size;
-    return new SqlQueryModel(RootType, Wheres, Includes, Orders, size, offset);
+    return new SqlQueryModel(RootType, Wheres, SearchKeyword, SearchOptions, SearchFilters, Includes, Orders, size, offset);
   }
 }
 
@@ -440,6 +464,24 @@ internal static class SqlQueryCompiler
       .Where(w => !string.IsNullOrWhiteSpace(w))
       .ToList();
 
+    string? searchRankSql = null;
+    if (!string.IsNullOrWhiteSpace(model.SearchKeyword) || model.SearchFilters?.Count > 0)
+    {
+      var (searchWhereSql, rankSql) = SqlHelper.BuildFilter(
+        model.RootType,
+        model.SearchKeyword,
+        model.SearchFilters == null ? null : new Dictionary<string, string>(model.SearchFilters, StringComparer.OrdinalIgnoreCase),
+        parameters,
+        dialect,
+        "t0",
+        model.SearchOptions);
+
+      if (!string.IsNullOrWhiteSpace(searchWhereSql))
+        whereParts.Add(searchWhereSql.Replace("WHERE ", string.Empty));
+
+      searchRankSql = rankSql;
+    }
+
     var whereSql = whereParts.Count == 0
       ? string.Empty
       : " WHERE " + string.Join(" AND ", whereParts);
@@ -447,6 +489,9 @@ internal static class SqlQueryCompiler
     var orderParts = model.Orders
       .Select(o => SqlHelper.BuildOrderBy(o.Expression, model.RootType, "t0", o.Desc, dialect))
       .ToList();
+
+    if (!string.IsNullOrWhiteSpace(searchRankSql))
+      orderParts.Insert(0, $"{searchRankSql} DESC");
 
     var orderSql = orderParts.Count == 0
       ? string.Empty
@@ -505,6 +550,24 @@ internal static class SqlQueryCompiler
       .Where(w => !string.IsNullOrWhiteSpace(w))
       .ToList();
 
+    string? searchRankSql = null;
+    if (!string.IsNullOrWhiteSpace(model.SearchKeyword) || model.SearchFilters?.Count > 0)
+    {
+      var (searchWhereSql, rankSql) = SqlHelper.BuildFilter(
+        model.RootType,
+        model.SearchKeyword,
+        model.SearchFilters == null ? null : new Dictionary<string, string>(model.SearchFilters, StringComparer.OrdinalIgnoreCase),
+        parameters,
+        dialect,
+        "t0",
+        model.SearchOptions);
+
+      if (!string.IsNullOrWhiteSpace(searchWhereSql))
+        whereParts.Add(searchWhereSql.Replace("WHERE ", string.Empty));
+
+      searchRankSql = rankSql;
+    }
+
     var whereSql = whereParts.Count == 0
       ? string.Empty
       : " WHERE " + string.Join(" AND ", whereParts);
@@ -512,6 +575,9 @@ internal static class SqlQueryCompiler
     var orderParts = model.Orders
       .Select(o => SqlHelper.BuildOrderBy(o.Expression, model.RootType, "t0", o.Desc, dialect))
       .ToList();
+
+    if (!string.IsNullOrWhiteSpace(searchRankSql))
+      orderParts.Insert(0, $"{searchRankSql} DESC");
 
     var orderSql = orderParts.Count == 0
       ? string.Empty
@@ -567,6 +633,24 @@ internal static class SqlQueryCompiler
       .Where(w => !string.IsNullOrWhiteSpace(w))
       .ToList();
 
+    string? searchRankSql = null;
+    if (!string.IsNullOrWhiteSpace(model.SearchKeyword) || model.SearchFilters?.Count > 0)
+    {
+      var (searchWhereSql, rankSql) = SqlHelper.BuildFilter(
+        model.RootType,
+        model.SearchKeyword,
+        model.SearchFilters == null ? null : new Dictionary<string, string>(model.SearchFilters, StringComparer.OrdinalIgnoreCase),
+        parameters,
+        dialect,
+        "t0",
+        model.SearchOptions);
+
+      if (!string.IsNullOrWhiteSpace(searchWhereSql))
+        whereParts.Add(searchWhereSql.Replace("WHERE ", string.Empty));
+
+      searchRankSql = rankSql;
+    }
+
     var whereSql = whereParts.Count == 0
       ? string.Empty
       : " WHERE " + string.Join(" AND ", whereParts);
@@ -574,6 +658,9 @@ internal static class SqlQueryCompiler
     var orderParts = model.Orders
       .Select(o => SqlHelper.BuildOrderBy(o.Expression, model.RootType, "t0", o.Desc, dialect))
       .ToList();
+
+    if (!string.IsNullOrWhiteSpace(searchRankSql))
+      orderParts.Insert(0, $"{searchRankSql} DESC");
 
     var orderSql = orderParts.Count == 0
       ? string.Empty
@@ -940,6 +1027,8 @@ internal static class SqlWriteCompiler
       var value = prop.Property.GetValue(entity);
       if (prop.IsJson)
         parameters.Add(prop.Property.Name, JsonSerializer.Serialize(value));
+      else if (prop.IsVector)
+        parameters.Add(prop.Property.Name, SqlVectorValueFormatter.Format(value));
       else
         parameters.Add(prop.Property.Name, value);
     }
@@ -964,7 +1053,11 @@ internal static class SqlWriteCompiler
     var table = dialect.Quote(tableName);
     var columns = string.Join(", ", insertProps.Select(p => dialect.Quote(p.Column)));
     var values = string.Join(", ", insertProps.Select(p =>
-      p.IsJson ? dialect.ParameterJsonCast($"@{p.Property.Name}") : $"@{p.Property.Name}"));
+      p.IsJson
+        ? dialect.ParameterJsonCast($"@{p.Property.Name}")
+        : p.IsVector && p.Vector != null
+          ? dialect.ParameterVectorCast($"@{p.Property.Name}", p.Vector)
+          : $"@{p.Property.Name}"));
 
     var conflictCols = string.Join(", ", keys.Select(k => dialect.Quote(k.Column)));
 
